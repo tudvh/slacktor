@@ -20,6 +20,7 @@ const MAX_SHARED_THREAD_CONTEXT_MESSAGES = 20
 const MAX_SHARED_THREAD_CONTEXT_CHARACTERS = 12_000
 const MAX_STANDALONE_CONTEXT_MESSAGES = 5
 const textEncoder = new TextEncoder()
+const QUICK_UI_KEY = "quick-translator-ui"
 type TranslationBatchItem = {
   id: string
   message: RawSlackMessage
@@ -50,13 +51,19 @@ export async function translateMessage(
   priority = false,
 ): Promise<string> {
   const settings = await getProviderSettings()
-  if (!settings.baseUrl || !settings.apiKey || !settings.model) {
-    throw new Error("Configure the AI provider in Slacktor options first.")
-  }
 
   if (!forceRefresh) {
+    const quickHistoryTranslation = await getQuickHistoryCounterpart(message.sourceText)
+    if (quickHistoryTranslation !== undefined) {
+      await cacheTranslation(message, settings, quickHistoryTranslation, context)
+      return quickHistoryTranslation
+    }
     const cached = await getCachedTranslation(message, settings, context)
     if (cached !== undefined) return cached
+  }
+
+  if (!settings.baseUrl || !settings.apiKey || !settings.model) {
+    throw new Error("Configure the AI provider in Slacktor options first.")
   }
 
   const inFlightId = getRequestDedupeId(message, settings)
@@ -95,6 +102,23 @@ export async function translateMessage(
       inFlightTranslations.delete(inFlightId)
     }
   }
+}
+
+async function getQuickHistoryCounterpart(sourceText: string): Promise<string | undefined> {
+  const stored = await chrome.storage.local.get(QUICK_UI_KEY)
+  const history = stored[QUICK_UI_KEY]?.history
+  if (!Array.isArray(history)) return undefined
+  const normalizedSource = normalizeQuickHistoryText(sourceText)
+  for (const entry of history) {
+    if (typeof entry?.japanese !== "string" || typeof entry?.english !== "string") continue
+    if (normalizeQuickHistoryText(entry.japanese) === normalizedSource) return entry.english
+    if (normalizeQuickHistoryText(entry.english) === normalizedSource) return entry.japanese
+  }
+  return undefined
+}
+
+function normalizeQuickHistoryText(text: string): string {
+  return text.replace(/\s+/g, " ").trim()
 }
 
 async function requestUrgentTranslation(
@@ -253,7 +277,7 @@ const BATCH_SYSTEM_PROMPT = [
   "Each [[SLACKTOR_LINE_BREAK]] token in currentMessage represents an exact line break. Preserve every token unchanged and in the same position in the translation.",
   "For threadGroups, use sharedContext only to resolve meaning for every item in that group. Translate only each item's currentMessage.",
   "For standaloneItems, use previousMessages only to resolve meaning. Translate only currentMessage.",
-  "Return only a JSON object with a translations array. Each entry must contain the unchanged id and its translation. Do not add markdown or commentary.",
+  "Return only valid JSON with a translations array. Each entry must contain the unchanged id and its translation. Escape quotation marks and control characters inside every JSON string. Do not add markdown or commentary.",
 ].join(" ")
 
 function buildBatchSystemPrompt(customPrompt: string): string {
@@ -393,6 +417,7 @@ async function requestWithRetry(
       }
     } catch (error) {
       lastError = error
+      if (signal?.aborted || isAbortError(error)) throw signal?.reason ?? error
       if (attempt === MAX_ATTEMPTS - 1) break
       onRetryStateChange?.(true)
       try {
@@ -403,6 +428,10 @@ async function requestWithRetry(
     }
   }
   throw lastError instanceof Error ? lastError : new Error("AI request failed after retries.")
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError"
 }
 
 function isRetriableStatus(status: number): boolean {
@@ -517,8 +546,8 @@ function parseBatchTranslations(content: string | undefined): Map<string, string
   try {
     data = JSON.parse(normalized) as typeof data
   } catch (error) {
-    if (!(error instanceof SyntaxError) || !/control character/i.test(error.message)) throw error
-    data = JSON.parse(escapeControlCharactersInJsonStrings(normalized)) as typeof data
+    if (!(error instanceof SyntaxError)) throw error
+    data = JSON.parse(sanitizeJsonStrings(normalized)) as typeof data
   }
   if (!Array.isArray(data.translations)) throw new Error("AI provider returned an invalid batch response.")
   return new Map(data.translations.flatMap((item) => (
@@ -528,12 +557,13 @@ function parseBatchTranslations(content: string | undefined): Map<string, string
   )))
 }
 
-function escapeControlCharactersInJsonStrings(json: string): string {
+function sanitizeJsonStrings(json: string): string {
   let result = ""
   let inString = false
   let escaped = false
 
-  for (const character of json) {
+  for (let index = 0; index < json.length; index += 1) {
+    const character = json[index]
     if (!inString) {
       result += character
       if (character === "\"") inString = true
@@ -551,8 +581,15 @@ function escapeControlCharactersInJsonStrings(json: string): string {
       continue
     }
     if (character === "\"") {
-      result += character
-      inString = false
+      const remainder = json.slice(index + 1)
+      const nextToken = remainder.match(/\S/)?.[0]
+      const commaEndsString = nextToken === "," && /^\s*,\s*(?:["{]|$)/.test(remainder)
+      if (nextToken === undefined || commaEndsString || ["}", "]", ":"].includes(nextToken)) {
+        result += character
+        inString = false
+      } else {
+        result += "\\\""
+      }
       continue
     }
 

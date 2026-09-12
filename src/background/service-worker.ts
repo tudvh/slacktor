@@ -1,5 +1,5 @@
 import { translateMessage } from "./translation-service"
-import type { ContentRequest, ExtensionRequest, PublicSettings, TranslateResponse } from "../shared/messages"
+import type { AppendToSlackInputResponse, ContentRequest, ExtensionRequest, PublicSettings, TranslateResponse } from "../shared/messages"
 import { getProviderSettings } from "../shared/settings"
 import { clearTranslationCache } from "./translation-cache"
 import { buildThreadContextPlan, getThreadContext, saveContextMessage } from "./context-store"
@@ -27,11 +27,13 @@ let providerRuntimeStatus: ProviderRuntimeStatus = {
 }
 
 void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
+void updateActionBadge()
 
 chrome.runtime.onMessage.addListener((request: ExtensionRequest, _sender, sendResponse) => {
   if (request.type === "get-public-settings") {
     void getProviderSettings().then((settings) => {
       const response: PublicSettings = {
+        extensionEnabled: settings.extensionEnabled,
         targetLanguage: settings.targetLanguage,
         configured: Boolean(settings.baseUrl && settings.apiKey && settings.model),
         autoTranslate: settings.autoTranslate,
@@ -56,12 +58,14 @@ chrome.runtime.onMessage.addListener((request: ExtensionRequest, _sender, sendRe
       controllers.add(controller)
       activeTranslationRequests.set(tabId, controllers)
     }
-    void translateMessage(
-      request.message,
-      request.context,
-      request.forceRefresh,
-      controller.signal,
-      (retrying) => {
+    void getProviderSettings().then((settings) => {
+      if (!settings.extensionEnabled) throw new DOMException("Slacktor is disabled.", "AbortError")
+      return translateMessage(
+        request.message,
+        request.context,
+        request.forceRefresh,
+        controller.signal,
+        (retrying) => {
         if (tabId === undefined) return
         const stats = slackTranslationStats.get(tabId) ?? {
           waiting: 0,
@@ -70,20 +74,22 @@ chrome.runtime.onMessage.addListener((request: ExtensionRequest, _sender, sendRe
         }
         stats.retrying = Math.max(0, stats.retrying + (retrying ? 1 : -1))
         slackTranslationStats.set(tabId, stats)
-      },
-      request.urgent,
-      request.priority,
-    )
+        },
+        request.urgent,
+        request.priority,
+      )
+    })
       .then((translation) => {
         providerRuntimeStatus = { state: "ready", message: "Provider configured and responding" }
         sendResponse({ ok: true, translation } satisfies TranslateResponse)
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : "Translation failed."
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
+        const cancelled = isAbortError(error)
+        if (!cancelled) {
           providerRuntimeStatus = { state: "error", message: conciseStatusMessage(message) }
         }
-        sendResponse({ ok: false, error: message } satisfies TranslateResponse)
+        sendResponse({ ok: false, error: message, cancelled } satisfies TranslateResponse)
       })
       .finally(() => {
         if (tabId === undefined) return
@@ -102,19 +108,27 @@ chrome.runtime.onMessage.addListener((request: ExtensionRequest, _sender, sendRe
   }
 
   if (request.type === "observe-message") {
-    void saveContextMessage(request.message).then(() => sendResponse({ ok: true }))
+    void getProviderSettings().then((settings) => {
+      if (!settings.extensionEnabled) return
+      return saveContextMessage(request.message)
+    }).then(() => sendResponse({ ok: true }))
     return true
   }
 
   if (request.type === "get-thread-context") {
-    void buildThreadContextPlan(request.message, summarizeThread)
+    void getProviderSettings().then((settings) => settings.extensionEnabled
+      ? buildThreadContextPlan(request.message, summarizeThread)
+      : { recentMessages: [] })
       .then((context) => sendResponse(context))
       .catch(() => sendResponse({ recentMessages: [] }))
     return true
   }
 
   if (request.type === "quick-translate") {
-    void quickTranslate(request.text)
+    void getProviderSettings().then((settings) => {
+      if (!settings.extensionEnabled) throw new Error("Slacktor is disabled.")
+      return quickTranslate(request.text, request.targetLanguage, request.backTranslationLanguage)
+    })
       .then((result) => {
         providerRuntimeStatus = { state: "ready", message: "Provider configured and responding" }
         sendResponse({ ok: true, ...result } satisfies QuickTranslateResponse)
@@ -192,7 +206,10 @@ chrome.runtime.onMessage.addListener((request: ExtensionRequest, _sender, sendRe
   if (request.type === "retranslate-visible-from-popup") {
     void sendToActiveSlackTab<{ ok: boolean; queued: number }>({ type: "retranslate-visible" })
       .then((response) => sendResponse(response))
-      .catch(() => sendResponse({ ok: false }))
+      .catch((error: unknown) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Could not reach a Slack tab.",
+      } satisfies AppendToSlackInputResponse))
     return true
   }
 
@@ -207,10 +224,42 @@ chrome.runtime.onMessage.addListener((request: ExtensionRequest, _sender, sendRe
 
   if (request.type === "set-translation-visibility") {
     void chrome.tabs.query({ url: "https://app.slack.com/*" }).then((tabs) => Promise.all(
-      tabs.flatMap((tab) => tab.id === undefined
+      tabs.flatMap((tab) => tab.id === undefined || typeof chrome.tabs.sendMessage !== "function"
         ? []
         : [chrome.tabs.sendMessage(tab.id, request).catch(() => undefined)]),
-    )).then(() => sendResponse({ ok: true }))
+    )).then(async () => {
+      await updateActionBadge(request.visible)
+      sendResponse({ ok: true })
+    }).catch(() => sendResponse({ ok: false }))
+    return true
+  }
+
+  if (request.type === "set-extension-enabled") {
+    if (!request.enabled) {
+      for (const controllers of activeTranslationRequests.values()) {
+        for (const controller of controllers) controller.abort(new DOMException("Slacktor is disabled.", "AbortError"))
+      }
+      translationRequestsById.clear()
+      slackTranslationStats.clear()
+    }
+    void chrome.tabs.query({ url: "https://app.slack.com/*" }).then((tabs) => Promise.all(
+      tabs.flatMap((tab) => tab.id === undefined || typeof chrome.tabs.sendMessage !== "function"
+        ? []
+        : [chrome.tabs.sendMessage(tab.id, request).catch(() => undefined)]),
+    )).then(async () => {
+      await updateActionBadge(undefined, request.enabled)
+      sendResponse({ ok: true })
+    }).catch(() => sendResponse({ ok: false }))
+    return true
+  }
+
+  if (request.type === "append-to-slack-input") {
+    void sendToWritableSlackTab({ type: "append-to-slack-input", text: request.text })
+      .then((response) => sendResponse(response))
+      .catch((error: unknown) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : "Could not reach a Slack tab.",
+      } satisfies AppendToSlackInputResponse))
     return true
   }
 
@@ -230,16 +279,60 @@ async function sendToActiveSlackTab<T>(message: ContentRequest): Promise<T> {
   return await chrome.tabs.sendMessage(tab.id, message) as T
 }
 
-async function updateActionBadge(): Promise<void> {
+async function sendToWritableSlackTab(message: ContentRequest): Promise<AppendToSlackInputResponse> {
+  const tabs = await chrome.tabs.query({ url: "https://app.slack.com/*" })
+  tabs.sort((left, right) => Number(right.active) - Number(left.active))
+  let lastError = tabs.length > 0 ? "No writable Slack input found." : "No Slack tab found."
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue
+    try {
+      let response: AppendToSlackInputResponse
+      try {
+        response = await chrome.tabs.sendMessage(tab.id, message) as AppendToSlackInputResponse
+      } catch (error) {
+        if (!isMissingReceiverError(error)) throw error
+        await injectContentScript(tab.id)
+        response = await chrome.tabs.sendMessage(tab.id, message) as AppendToSlackInputResponse
+      }
+      if (response?.ok) return response
+      if (response?.error) lastError = response.error
+    } catch (error) {
+      if (error instanceof Error) lastError = error.message
+      // Try another Slack tab when its content script is unavailable.
+    }
+  }
+  return { ok: false, error: lastError }
+}
+
+async function injectContentScript(tabId: number): Promise<void> {
+  const files = chrome.runtime.getManifest().content_scripts?.flatMap((script) => script.js ?? []) ?? []
+  if (files.length === 0) throw new Error("Slacktor content script is unavailable.")
+  await chrome.scripting.executeScript({ target: { tabId }, files })
+}
+
+function isMissingReceiverError(error: unknown): boolean {
+  return error instanceof Error && (
+    error.message.includes("Could not establish connection")
+    || error.message.includes("Receiving end does not exist")
+  )
+}
+
+async function updateActionBadge(showTranslations?: boolean, extensionEnabled?: boolean): Promise<void> {
   let total = 0
   for (const stats of slackTranslationStats.values()) {
     total += stats.waiting + stats.active
   }
 
-  await chrome.action.setBadgeBackgroundColor({ color: "#4a154b" })
-  await chrome.action.setBadgeText({ text: total > 0 ? (total > 99 ? "99+" : String(total)) : "" })
+  const settings = await getProviderSettings()
+  const enabled = extensionEnabled ?? settings.extensionEnabled
+  const translationsVisible = showTranslations ?? settings.showTranslations
+  const disabled = (!enabled || !translationsVisible) && total === 0
+  await chrome.action.setBadgeBackgroundColor({ color: disabled ? "#616061" : "#4a154b" })
+  await chrome.action.setBadgeText({ text: total > 0 ? (total > 99 ? "99+" : String(total)) : disabled ? "−" : "" })
   await chrome.action.setTitle({
-    title: total > 0 ? `Slacktor - ${total} Slack translations active or waiting` : "Slacktor",
+    title: total > 0
+      ? `Slacktor - ${total} Slack translations active or waiting`
+      : !enabled ? "Slacktor - extension disabled" : disabled ? "Slacktor - translations hidden" : "Slacktor",
   })
 }
 
@@ -252,4 +345,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 function conciseStatusMessage(message: string): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 160) || "Provider request failed"
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError"
 }

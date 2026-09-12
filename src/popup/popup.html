@@ -12,9 +12,13 @@
       <header>
         <div class="brand-mark"><img src="/icons/icon-32.png" alt="Slacktor" /></div>
         <div class="brand-copy">
-          <h1>Slacktor <span class="app-version">v0.1.4</span></h1>
+          <h1>Slacktor <span class="app-version">v0.1.5</span></h1>
           <span id="connection-status" class="status-dot unconfigured" role="status" tabindex="0" title="Checking provider status" aria-label="Checking provider status"></span>
         </div>
+        <label id="translation-toggle" class="switch" title="Disable translation">
+          <input id="show-translations" type="checkbox" aria-label="Disable translation" />
+          <span aria-hidden="true"></span>
+        </label>
         <button id="show-logs" class="icon-button" type="button" title="Logs" aria-label="Logs">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.75A2.75 2.75 0 0 1 7.75 2H19a1 1 0 0 1 1 1v16.25A2.75 2.75 0 0 1 17.25 22H7.75A3.75 3.75 0 0 1 4 18.25V5.75a1 1 0 0 1 1-1Zm2.75-.75A.75.75 0 0 0 7 4.75v10.58c.24-.05.49-.08.75-.08H18V4H7.75ZM6 18.25A1.75 1.75 0 0 0 7.75 20h9.5A.75.75 0 0 0 18 19.25v-2H7.75A1.75 1.75 0 0 0 6 19v-.75ZM12 6.5a1 1 0 0 1 1 1v3a1 1 0 1 1-2 0v-3a1 1 0 0 1 1-1Zm0 7.25a1.125 1.125 0 1 1 0-2.25 1.125 1.125 0 0 1 0 2.25Z"/></svg>
         </button>
@@ -22,15 +26,14 @@
       </header>
 
       <section id="main-view" class="view">
-        <label class="toggle-row main-visibility-toggle">
-          <input id="show-translations" type="checkbox" />
-          <span><strong>Show translations in Slack</strong><small>Turn off to copy only original messages.</small></span>
-        </label>
         <section class="quick-translator">
         <div class="section-heading">
           <div>
             <h2>Quick Translator</h2>
-            <p>Translate to Japanese, then back to English for verification.</p>
+            <div class="quick-language-settings">
+              <span>Translate to</span><input id="quick-target-language" aria-label="Translate to language" type="text" maxlength="10" value="Japanese" />
+              <span>then translate to</span><input id="quick-back-language" aria-label="Back translation language" type="text" maxlength="10" value="English" />
+            </div>
           </div>
         </div>
         <label>
@@ -43,11 +46,11 @@
         </div>
         <div id="quick-results" class="quick-results" hidden>
           <article>
-            <div class="quick-result-actions"><button class="copy-icon" data-copy="japanese" type="button" title="Copy" aria-label="Copy Japanese"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2h9a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3h-1v-2h1a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v1H5V5a3 3 0 0 1 3-3Z"/><path d="M4 6h9a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H4Z"/></svg></button></div>
+            <div class="quick-result-actions"><button class="move-to-input" data-move="japanese" type="button" title="Move to Slack input" aria-label="Move first translation to Slack input"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h2v9.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3Z"/><path d="M4 14h2v5h12v-5h2v7H4v-7Z"/></svg></button><button class="copy-icon" data-copy="japanese" type="button" title="Copy" aria-label="Copy first translation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2h9a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3h-1v-2h1a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v1H5V5a3 3 0 0 1 3-3Z"/><path d="M4 6h9a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H4Z"/></svg></button></div>
             <pre id="quick-japanese"></pre>
           </article>
           <article>
-            <div class="quick-result-actions"><button class="copy-icon" data-copy="english" type="button" title="Copy" aria-label="Copy English"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2h9a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3h-1v-2h1a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v1H5V5a3 3 0 0 1 3-3Z"/><path d="M4 6h9a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H4Z"/></svg></button></div>
+            <div class="quick-result-actions"><button class="move-to-input" data-move="english" type="button" title="Move to Slack input" aria-label="Move back translation to Slack input"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h2v9.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3Z"/><path d="M4 14h2v5h12v-5h2v7H4v-7Z"/></svg></button><button class="copy-icon" data-copy="english" type="button" title="Copy" aria-label="Copy back translation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2h9a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3h-1v-2h1a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v1H5V5a3 3 0 0 1 3-3Z"/><path d="M4 6h9a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H4Z"/></svg></button></div>
             <pre id="quick-english"></pre>
           </article>
         </div>
@@ -67,6 +70,10 @@
         <div class="settings-heading"><button id="back-main" type="button">&#8592;</button><div><h2>Settings</h2><p>Provider and Slack translation preferences.</p></div></div>
         <form id="quick-settings">
         <div class="settings-fields">
+        <label class="toggle-row">
+          <input id="extension-enabled" type="checkbox" />
+          <span><strong>Enable Slacktor</strong><small>Disable this installation completely to avoid conflicts.</small></span>
+        </label>
         <label>
           AI endpoint
           <input id="base-url" type="url" placeholder="https://api.example.com/v1" required />
@@ -95,6 +102,12 @@
           <input id="auto-translate" type="checkbox" />
           <span><strong>Auto-translate messages</strong><small>System, bot, and deleted messages stay excluded.</small></span>
         </label>
+        <section class="config-transfer">
+          <strong>Configuration transfer</strong>
+          <div><span>Export</span><button id="export-config-file" class="secondary" type="button">File</button><button id="export-config-clipboard" class="secondary" type="button">Clipboard</button></div>
+          <div><span>Import</span><button id="import-config-file" class="secondary" type="button">File</button><button id="import-config-clipboard" class="secondary" type="button">Clipboard</button></div>
+          <input id="config-file-input" type="file" accept="application/json,.json" hidden />
+        </section>
         </div>
 
         <div class="settings-actions">

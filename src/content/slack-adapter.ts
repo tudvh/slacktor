@@ -4,7 +4,8 @@ import type { AuthorIdentity, RawSlackMessage } from "../shared/types"
 // so Milestone 1 changes remain isolated from the observer and renderer.
 const MESSAGE_CONTAINER_SELECTOR = "[data-qa='message_container']"
 const FALLBACK_MESSAGE_SELECTOR = "[data-message-id], .c-message_kit__message[data-ts]"
-const MESSAGE_SELECTOR = `${MESSAGE_CONTAINER_SELECTOR}, ${FALLBACK_MESSAGE_SELECTOR}`
+const LINK_SHARE_SELECTOR = ".c-message_attachment, .c-message_kit__unfurl, [data-qa='message_attachment']"
+const MESSAGE_SELECTOR = `${MESSAGE_CONTAINER_SELECTOR}, ${FALLBACK_MESSAGE_SELECTOR}, ${LINK_SHARE_SELECTOR}`
 
 const SYSTEM_SELECTOR = [
   "[data-message-type='system']",
@@ -47,12 +48,15 @@ export function findMessageNodes(root: ParentNode = document): HTMLElement[] {
   // outermost-candidate rule let a broad data-message-id wrapper swallow all
   // reply containers, so only a thread root reached IndexedDB.
   const containers = Array.from(root.querySelectorAll<HTMLElement>(MESSAGE_CONTAINER_SELECTOR))
-  if (containers.length > 0) return containers
+  const linkShares = Array.from(root.querySelectorAll<HTMLElement>(LINK_SHARE_SELECTOR))
+    .filter(isSlackMessageLinkShare)
+  if (containers.length > 0) return [...containers, ...linkShares]
 
-  return Array.from(root.querySelectorAll<HTMLElement>(FALLBACK_MESSAGE_SELECTOR)).filter((node) => {
+  const fallback = Array.from(root.querySelectorAll<HTMLElement>(FALLBACK_MESSAGE_SELECTOR)).filter((node) => {
     if (node.hasAttribute("data-slacktor-translation")) return false
     return node.closest<HTMLElement>(FALLBACK_MESSAGE_SELECTOR) === node
   })
+  return [...fallback, ...linkShares]
 }
 
 export function extractMessage(node: HTMLElement): RawSlackMessage | undefined {
@@ -146,9 +150,18 @@ export function getTranslationAnchor(node: HTMLElement): HTMLElement | undefined
 }
 
 export function isMessageCandidate(node: HTMLElement): boolean {
-  return node.matches(MESSAGE_CONTAINER_SELECTOR) || (
+  return node.matches(MESSAGE_CONTAINER_SELECTOR) || isSlackMessageLinkShare(node) || (
     !node.closest<HTMLElement>(MESSAGE_CONTAINER_SELECTOR) && node.matches(FALLBACK_MESSAGE_SELECTOR)
   )
+}
+
+export function findClosestMessageNode(node: HTMLElement): HTMLElement | undefined {
+  const candidate = node.closest<HTMLElement>(MESSAGE_SELECTOR)
+  if (!candidate) return undefined
+  if (candidate.matches(LINK_SHARE_SELECTOR) && !isSlackMessageLinkShare(candidate)) {
+    return candidate.closest<HTMLElement>(`${MESSAGE_CONTAINER_SELECTOR}, ${FALLBACK_MESSAGE_SELECTOR}`) ?? undefined
+  }
+  return candidate
 }
 
 function getTextNode(node: HTMLElement): HTMLElement | undefined {
@@ -157,11 +170,21 @@ function getTextNode(node: HTMLElement): HTMLElement | undefined {
   // block-kit/message-text descendant, so query each preferred text container
   // explicitly to avoid sending sender names and timestamps to the AI.
   return (
+    node.matches(LINK_SHARE_SELECTOR)
+      ? node.querySelector<HTMLElement>("[data-qa='message-text'], .c-message_attachment__text, .c-message_attachment__body, .c-message_kit__unfurl__description, .p-rich_text_section")
+      : undefined
+  ) ?? (
     node.querySelector<HTMLElement>("[data-qa='message-text']") ??
     node.querySelector<HTMLElement>(".p-rich_text_section") ??
     node.querySelector<HTMLElement>(".c-message__body") ??
     undefined
   )
+}
+
+function isSlackMessageLinkShare(node: HTMLElement): boolean {
+  if (!node.matches(LINK_SHARE_SELECTOR)) return false
+  const permalink = node.querySelector<HTMLAnchorElement>("a.c-timestamp[href*='/p'], a[href*='/archives/'][href*='/p']")
+  return Boolean(permalink && getTextNode(node))
 }
 
 function findMessageId(node: HTMLElement): string | undefined {

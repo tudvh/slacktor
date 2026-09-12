@@ -1,5 +1,6 @@
 import {
   extractMessage,
+  findClosestMessageNode,
   findMessageNodes,
   getTranslationAnchor,
   isMessageCandidate,
@@ -7,10 +8,11 @@ import {
 import { renderPlaceholder } from "./translation-renderer"
 import type { TranslationController } from "./translation-renderer"
 import type { PublicSettings } from "../shared/messages"
-import type { ContentRequest } from "../shared/messages"
+import type { AppendToSlackInputResponse, ContentRequest } from "../shared/messages"
 import type { RawSlackMessage, ThreadContextPlan } from "../shared/types"
 
 let settings: PublicSettings = {
+  extensionEnabled: true,
   targetLanguage: "Vietnamese",
   configured: false,
   autoTranslate: false,
@@ -60,14 +62,10 @@ const THREAD_PANEL_SELECTOR = [
 
 async function inspect(node: HTMLElement): Promise<void> {
   try {
-    if (!settings.privacyConsent) return
+    if (!settings.extensionEnabled || !settings.privacyConsent) return
     const message = extractMessage(node)
     const anchor = getTranslationAnchor(node)
     if (message && anchor) {
-      // Messages sent by the current user are first rendered with a temporary
-      // client ID. Wait for Slack's stable timestamp so the optimistic and
-      // confirmed DOM versions cannot produce separate translation requests.
-      if (!message.timestamp) return
       const messageKey = resolveMessageKey(message)
       const existingJob = queuedTranslations.get(messageKey)
       if (existingJob && !existingJob.started && isInThreadPanel(node)) {
@@ -172,20 +170,20 @@ export function startMessageObserver(): MutationObserver {
       if (record.type === "childList" && record.target instanceof HTMLElement) {
         const container = isMessageCandidate(record.target)
           ? record.target
-          : record.target.closest<HTMLElement>("[data-qa='message_container'], [data-message-id], .c-message_kit__message[data-ts]")
+          : findClosestMessageNode(record.target)
         if (container) void inspect(container)
       }
       for (const addedNode of Array.from(record.addedNodes)) {
         if (!(addedNode instanceof HTMLElement)) continue
         if (isMessageCandidate(addedNode)) void inspect(addedNode)
-        const container = addedNode.closest<HTMLElement>("[data-qa='message_container'], [data-message-id], .c-message_kit__message[data-ts]")
+        const container = findClosestMessageNode(addedNode)
         if (container) void inspect(container)
         for (const node of findMessageNodes(addedNode)) void inspect(node)
       }
       if (record.type === "attributes" && record.target instanceof HTMLElement) {
         const container = isMessageCandidate(record.target)
           ? record.target
-          : record.target.closest<HTMLElement>("[data-qa='message_container'], [data-message-id], .c-message_kit__message[data-ts]")
+          : findClosestMessageNode(record.target)
         if (container) void inspect(container)
       }
     }
@@ -209,6 +207,10 @@ export function startMessageObserver(): MutationObserver {
 
   chrome.runtime.onMessage.addListener((request: ContentRequest, _sender, sendResponse) => {
     if (request.type === "retranslate-visible") {
+      if (!settings.extensionEnabled) {
+        sendResponse({ ok: false, queued: 0 })
+        return
+      }
       let queued = 0
       for (const node of findMessageNodes()) {
         const message = extractMessage(node)
@@ -248,9 +250,89 @@ export function startMessageObserver(): MutationObserver {
       settings.showTranslations = request.visible
       applyTranslationVisibility(request.visible)
     }
+
+    if (request.type === "set-extension-enabled") {
+      settings.extensionEnabled = request.enabled
+      if (request.enabled) {
+        void loadSettingsAndInspect()
+      } else {
+        cancelAllTranslationJobs()
+        autoTranslationQueue.length = 0
+        queuedTranslations.clear()
+        for (const host of Array.from(document.querySelectorAll("[data-slacktor-translation]"))) host.remove()
+        for (const node of Array.from(document.querySelectorAll("[data-slacktor-rendered]"))) node.removeAttribute("data-slacktor-rendered")
+        controllers.clear()
+        completedTranslationsByMessage.clear()
+        publishQueueStats()
+      }
+    }
+
+    if (request.type === "append-to-slack-input") {
+      if (!settings.extensionEnabled) {
+        sendResponse({ ok: false, error: "Slacktor is disabled." } satisfies AppendToSlackInputResponse)
+        return
+      }
+      sendResponse(appendToSlackInput(request.text))
+    }
   })
 
   return observer
+}
+
+function appendToSlackInput(text: string): AppendToSlackInputResponse {
+  const selector = [
+    "[data-qa='message_input'] [contenteditable='true']",
+    "[data-qa='message_input'][contenteditable='true']",
+    "div[role='textbox'][contenteditable='true'][data-slate-editor='true']",
+    "[data-qa='message_input'] [role='textbox'][contenteditable='true']",
+    "[data-qa='message_input'] .ql-editor[contenteditable='true']",
+    "[data-qa='message_input'] [contenteditable='plaintext-only']",
+    "[aria-label*='message' i][role='textbox'][contenteditable='true']",
+  ].join(", ")
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+  const focusedComposer = activeElement?.matches(selector)
+    ? activeElement
+    : activeElement?.closest<HTMLElement>("[data-qa='message_input']")?.querySelector<HTMLElement>("[contenteditable='true'], [contenteditable='plaintext-only']")
+  const composer = focusedComposer ?? Array.from(document.querySelectorAll<HTMLElement>(selector))
+    .find(isWritableComposer)
+  if (!composer) return { ok: false, error: "No visible Slack composer was found." }
+
+  const previousText = composer.textContent ?? ""
+  composer.focus()
+  const selection = window.getSelection()
+  if (selection && (!composer.contains(selection.anchorNode) || selection.rangeCount === 0)) {
+    const range = document.createRange()
+    range.selectNodeContents(composer)
+    range.collapse(false)
+    selection.removeAllRanges()
+    selection.addRange(range)
+  }
+  document.execCommand("insertText", false, text)
+  if ((composer.textContent ?? "") !== previousText) return { ok: true }
+
+  if (!selection?.rangeCount) return { ok: false, error: "Slack composer could not receive focus." }
+  const range = selection.getRangeAt(0)
+  range.deleteContents()
+  const textNode = document.createTextNode(text)
+  range.insertNode(textNode)
+  range.setStartAfter(textNode)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
+  composer.dispatchEvent(new InputEvent("input", {
+    bubbles: true,
+    inputType: "insertText",
+    data: text,
+  }))
+  return (composer.textContent ?? "") !== previousText
+    ? { ok: true }
+    : { ok: false, error: "Slack rejected the inserted text." }
+}
+
+function isWritableComposer(candidate: HTMLElement): boolean {
+  return candidate.getClientRects().length > 0
+    && candidate.getAttribute("aria-disabled") !== "true"
+    && candidate.getAttribute("contenteditable") !== "false"
 }
 
 function getMessageKey(message: RawSlackMessage): string {
@@ -282,6 +364,10 @@ function resolveMessageKey(message: RawSlackMessage): string {
     return existing.messageKey
   }
 
+  if (!Number.isFinite(timestamp)) {
+    recentMessageAliases.set(aliasKey, { messageKey, timestamp, lastSeenAt: now })
+    return messageKey
+  }
   if (!isRecentTimestamp(timestamp)) return messageKey
 
   recentMessageAliases.set(aliasKey, { messageKey, timestamp, lastSeenAt: now })
@@ -442,7 +528,7 @@ async function loadSettingsAndInspect(): Promise<void> {
     const response = await sendMessageSafely<PublicSettings>({ type: "get-public-settings" })
     if (response) settings = response
     applyTranslationVisibility(settings.showTranslations)
-    if (!settings.privacyConsent) return
+    if (!settings.extensionEnabled || !settings.privacyConsent) return
     for (const node of findMessageNodes()) void inspect(node)
   } catch (error) {
     if (!isContextInvalidated(error)) throw error

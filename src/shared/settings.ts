@@ -1,4 +1,5 @@
 export type ProviderSettings = {
+  extensionEnabled: boolean
   baseUrl: string
   apiKey: string
   model: string
@@ -12,6 +13,7 @@ export type ProviderSettings = {
 const SETTINGS_KEY = "provider-settings"
 
 export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
+  extensionEnabled: true,
   baseUrl: "",
   apiKey: "",
   model: "",

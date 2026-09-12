@@ -2,6 +2,7 @@ import type { RawSlackMessage, ThreadContextPlan } from "./types"
 import type { ProviderSettings } from "./settings"
 
 export type PublicSettings = {
+  extensionEnabled: boolean
   targetLanguage: string
   configured: boolean
   autoTranslate: boolean
@@ -41,6 +42,8 @@ export type GetThreadContextRequest = {
 export type QuickTranslateRequest = {
   type: "quick-translate"
   text: string
+  targetLanguage: string
+  backTranslationLanguage: string
 }
 
 export type GetLogsRequest = { type: "get-logs" }
@@ -62,6 +65,9 @@ export type TestProviderRequest = {
 export type RetranslateVisibleRequest = { type: "retranslate-visible-from-popup" }
 export type TerminateSlackTranslationsRequest = { type: "terminate-slack-translations" }
 export type SetTranslationVisibilityRequest = { type: "set-translation-visibility"; visible: boolean }
+export type SetExtensionEnabledRequest = { type: "set-extension-enabled"; enabled: boolean }
+export type AppendToSlackInputRequest = { type: "append-to-slack-input"; text: string }
+export type AppendToSlackInputResponse = { ok: boolean; error?: string }
 
 export type ExtensionRequest =
   | TranslateRequest
@@ -80,15 +86,19 @@ export type ExtensionRequest =
   | RetranslateVisibleRequest
   | TerminateSlackTranslationsRequest
   | SetTranslationVisibilityRequest
+  | SetExtensionEnabledRequest
+  | AppendToSlackInputRequest
 
 export type ContentRequest =
   | { type: "retranslate-visible" }
   | { type: "terminate-slack-translations" }
   | { type: "set-translation-visibility"; visible: boolean }
+  | { type: "set-extension-enabled"; enabled: boolean }
+  | { type: "append-to-slack-input"; text: string }
 
 export type TranslateResponse =
   | { ok: true; translation: string }
-  | { ok: false; error: string }
+  | { ok: false; error: string; cancelled?: boolean }
 
 export type QuickTranslateResponse =
   | { ok: true; japanese: string; english: string }

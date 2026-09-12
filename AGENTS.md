@@ -31,3 +31,4 @@ Slacktor is a Chrome Manifest V3 extension that translates Slack Web messages th
 - Keep `package.json` and `src/manifest.ts` versions identical.
 - Prefer minimal changes and run `npm run build` after code edits.
 - Do not edit generated files in `dist/`; regenerate them with the build.
+- Use icons, not visible text, for compact actions attached to translation results. Put the action name in `title` and an explicit accessible description in `aria-label`.

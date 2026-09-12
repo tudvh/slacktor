@@ -101,6 +101,7 @@ export function renderPlaceholder(
       .then((response) => {
         if (generation !== requestGeneration) return undefined
         if (!response?.ok) {
+          if (response?.cancelled) return undefined
           showRetry(response?.error ?? "Translation failed.")
           return undefined
         }
@@ -111,7 +112,9 @@ export function renderPlaceholder(
       .catch((error: unknown) => {
         // Reloading the extension destroys an in-flight content-script context.
         // Avoid emitting an uncaught error from the old renderer instance.
-        if (generation === requestGeneration && !isContextInvalidated(error)) showRetry("Translation failed.")
+        if (generation === requestGeneration && !isContextInvalidated(error) && !isAbortError(error)) {
+          showRetry("Translation failed.")
+        }
         return undefined
       })
       .finally(() => {
@@ -188,7 +191,9 @@ export function renderPlaceholder(
       requestGeneration += 1
       translating = false
       if (activeRequestId) {
-        void chrome.runtime.sendMessage({ type: "cancel-translation", requestId: activeRequestId })
+        if (typeof chrome.runtime?.sendMessage === "function") {
+          void chrome.runtime.sendMessage({ type: "cancel-translation", requestId: activeRequestId }).catch(() => undefined)
+        }
         activeRequestId = undefined
       }
     },
@@ -238,6 +243,10 @@ function sendTranslationRequest(
 
 function isContextInvalidated(error: unknown): boolean {
   return error instanceof Error && error.message.includes("Extension context invalidated")
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError"
 }
 
 function createSpinner(): HTMLSpanElement {

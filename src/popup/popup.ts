@@ -11,9 +11,13 @@ const apiKey = document.querySelector<HTMLInputElement>("#api-key")!
 const targetLanguage = document.querySelector<HTMLInputElement>("#target-language")!
 const customPrompt = document.querySelector<HTMLTextAreaElement>("#custom-prompt")!
 const autoTranslate = document.querySelector<HTMLInputElement>("#auto-translate")!
+const extensionEnabled = document.querySelector<HTMLInputElement>("#extension-enabled")!
 const showTranslations = document.querySelector<HTMLInputElement>("#show-translations")!
+const translationToggle = document.querySelector<HTMLLabelElement>("#translation-toggle")!
 const toggleKey = document.querySelector<HTMLButtonElement>("#toggle-key")!
 const quickSource = document.querySelector<HTMLTextAreaElement>("#quick-source")!
+const quickTargetLanguage = document.querySelector<HTMLInputElement>("#quick-target-language")!
+const quickBackLanguage = document.querySelector<HTMLInputElement>("#quick-back-language")!
 const quickTranslateButton = document.querySelector<HTMLButtonElement>("#quick-translate")!
 const quickResults = document.querySelector<HTMLElement>("#quick-results")!
 const quickJapanese = document.querySelector<HTMLElement>("#quick-japanese")!
@@ -31,6 +35,7 @@ const showLogsButton = document.querySelector<HTMLButtonElement>("#show-logs")!
 const privacyConsentModal = document.querySelector<HTMLDialogElement>("#privacy-consent-modal")!
 const privacyConsentCheck = document.querySelector<HTMLInputElement>("#privacy-consent-check")!
 const acceptPrivacyConsent = document.querySelector<HTMLButtonElement>("#accept-privacy-consent")!
+const configFileInput = document.querySelector<HTMLInputElement>("#config-file-input")!
 let privacyConsent = false
 let currentLogs: SlacktorLogEntry[] = []
 
@@ -43,13 +48,26 @@ type QuickHistoryEntry = {
 }
 type QuickUiState = {
   draft: string
+  targetLanguage: string
+  backTranslationLanguage: string
   clearAfterClose: boolean
   lastTranslatedSource?: string
   history: QuickHistoryEntry[]
 }
+type ExportedConfig = {
+  schemaVersion: 1
+  providerSettings: ProviderSettings
+  quickTranslator: Pick<QuickUiState, "targetLanguage" | "backTranslationLanguage">
+}
 const QUICK_UI_KEY = "quick-translator-ui"
 const QUICK_HISTORY_RETENTION_MS = 2 * 24 * 60 * 60 * 1000
-let quickUiState: QuickUiState = { draft: "", clearAfterClose: false, history: [] }
+let quickUiState: QuickUiState = {
+  draft: "",
+  targetLanguage: "Japanese",
+  backTranslationLanguage: "English",
+  clearAfterClose: false,
+  history: [],
+}
 
 void Promise.all([load(), loadQuickUiState()])
 void refreshSlackApiStats()
@@ -61,6 +79,7 @@ window.setInterval(() => {
 
 async function load(): Promise<void> {
   const settings = await getProviderSettings()
+  extensionEnabled.checked = settings.extensionEnabled
   baseUrl.value = settings.baseUrl
   model.value = settings.model
   apiKey.value = settings.apiKey
@@ -68,6 +87,7 @@ async function load(): Promise<void> {
   customPrompt.value = settings.customPrompt
   autoTranslate.checked = settings.autoTranslate
   showTranslations.checked = settings.showTranslations
+  updateTranslationToggleTooltip()
   privacyConsent = settings.privacyConsent
   updateConnectionStatus()
   if (!privacyConsent) privacyConsentModal.showModal()
@@ -92,6 +112,8 @@ async function loadQuickUiState(): Promise<void> {
     await saveQuickUiState()
   }
   quickSource.value = quickUiState.draft
+  quickTargetLanguage.value = quickUiState.targetLanguage
+  quickBackLanguage.value = quickUiState.backTranslationLanguage
   renderHistory()
 }
 
@@ -116,8 +138,8 @@ function renderHistory(): void {
       quickEnglish.textContent = entry.english
       quickResults.hidden = false
       quickUiState.draft = quickSource.value
-      quickUiState.clearAfterClose = false
-      quickUiState.lastTranslatedSource = undefined
+      quickUiState.clearAfterClose = true
+      quickUiState.lastTranslatedSource = quickSource.value
       void saveQuickUiState()
     })
     historyList.append(item)
@@ -148,6 +170,14 @@ quickSource.addEventListener("input", () => {
   quickUiState.lastTranslatedSource = undefined
   void saveQuickUiState()
 })
+
+for (const input of [quickTargetLanguage, quickBackLanguage]) {
+  input.addEventListener("input", () => {
+    quickUiState.targetLanguage = quickTargetLanguage.value
+    quickUiState.backTranslationLanguage = quickBackLanguage.value
+    void saveQuickUiState()
+  })
+}
 
 form.addEventListener("submit", (event) => {
   event.preventDefault()
@@ -233,6 +263,7 @@ document.querySelector<HTMLButtonElement>("#test-provider")!.addEventListener("c
 
 function getDraftProviderSettings(): ProviderSettings {
   const settings = {
+    extensionEnabled: extensionEnabled.checked,
     baseUrl: baseUrl.value.trim(),
     apiKey: apiKey.value.trim(),
     model: model.value.trim(),
@@ -248,15 +279,145 @@ function getDraftProviderSettings(): ProviderSettings {
   return settings
 }
 
+extensionEnabled.addEventListener("change", () => {
+  void getProviderSettings().then((settings) => saveProviderSettings({
+    ...settings,
+    extensionEnabled: extensionEnabled.checked,
+  })).then(() => chrome.runtime.sendMessage({
+    type: "set-extension-enabled",
+    enabled: extensionEnabled.checked,
+  })).then(() => {
+    saveStatus.className = "save-status success"
+    saveStatus.textContent = extensionEnabled.checked ? "Slacktor enabled." : "Slacktor disabled for this installation."
+  }).catch(() => {
+    saveStatus.className = "save-status error"
+    saveStatus.textContent = "Could not update Slacktor state."
+  })
+})
+
+document.querySelector<HTMLButtonElement>("#export-config-file")!.addEventListener("click", () => {
+  void exportConfig().then((config) => {
+    const url = URL.createObjectURL(new Blob([config], { type: "application/json" }))
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "slacktor-config.json"
+    link.click()
+    URL.revokeObjectURL(url)
+    showConfigSuccess("Configuration exported to file. Keep it private because it contains your API key.")
+  }).catch(showConfigError)
+})
+
+document.querySelector<HTMLButtonElement>("#export-config-clipboard")!.addEventListener("click", () => {
+  void exportConfig().then((config) => navigator.clipboard.writeText(config)).then(() => {
+    showConfigSuccess("Configuration copied. It contains your API key.")
+  }).catch(showConfigError)
+})
+
+document.querySelector<HTMLButtonElement>("#import-config-file")!.addEventListener("click", () => configFileInput.click())
+configFileInput.addEventListener("change", () => {
+  const file = configFileInput.files?.[0]
+  configFileInput.value = ""
+  if (file) void file.text().then(importConfig).catch(showConfigError)
+})
+
+document.querySelector<HTMLButtonElement>("#import-config-clipboard")!.addEventListener("click", () => {
+  void navigator.clipboard.readText().then(importConfig).catch(showConfigError)
+})
+
+async function exportConfig(): Promise<string> {
+  const config: ExportedConfig = {
+    schemaVersion: 1,
+    providerSettings: await getProviderSettings(),
+    quickTranslator: {
+      targetLanguage: quickUiState.targetLanguage,
+      backTranslationLanguage: quickUiState.backTranslationLanguage,
+    },
+  }
+  return JSON.stringify(config, null, 2)
+}
+
+async function importConfig(text: string): Promise<void> {
+  const config = parseImportedConfig(text)
+  if (config.providerSettings.baseUrl) await requestProviderPermission(config.providerSettings.baseUrl)
+  await saveProviderSettings(config.providerSettings)
+  quickUiState.targetLanguage = config.quickTranslator.targetLanguage
+  quickUiState.backTranslationLanguage = config.quickTranslator.backTranslationLanguage
+  await saveQuickUiState()
+  await load()
+  quickTargetLanguage.value = quickUiState.targetLanguage
+  quickBackLanguage.value = quickUiState.backTranslationLanguage
+  await chrome.runtime.sendMessage({ type: "set-extension-enabled", enabled: config.providerSettings.extensionEnabled })
+  await chrome.runtime.sendMessage({ type: "set-translation-visibility", visible: config.providerSettings.showTranslations })
+  showConfigSuccess("Configuration imported.")
+}
+
+function parseImportedConfig(text: string): ExportedConfig {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error("The selected content is not valid JSON.")
+  }
+  if (!isRecord(value) || value.schemaVersion !== 1 || !isProviderSettings(value.providerSettings) || !isRecord(value.quickTranslator)) {
+    throw new Error("This is not a valid Slacktor configuration file.")
+  }
+  const targetLanguage = value.quickTranslator.targetLanguage
+  const backTranslationLanguage = value.quickTranslator.backTranslationLanguage
+  if (typeof targetLanguage !== "string" || typeof backTranslationLanguage !== "string" || !targetLanguage.trim() || !backTranslationLanguage.trim()) {
+    throw new Error("Quick Translator languages are invalid.")
+  }
+  return {
+    schemaVersion: 1,
+    providerSettings: value.providerSettings,
+    quickTranslator: { targetLanguage: targetLanguage.trim(), backTranslationLanguage: backTranslationLanguage.trim() },
+  }
+}
+
+function isProviderSettings(value: unknown): value is ProviderSettings {
+  if (!isRecord(value)) return false
+  return typeof value.extensionEnabled === "boolean"
+    && typeof value.baseUrl === "string"
+    && typeof value.apiKey === "string"
+    && typeof value.model === "string"
+    && typeof value.targetLanguage === "string"
+    && typeof value.customPrompt === "string"
+    && typeof value.autoTranslate === "boolean"
+    && typeof value.showTranslations === "boolean"
+    && typeof value.privacyConsent === "boolean"
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function showConfigSuccess(message: string): void {
+  saveStatus.className = "save-status success"
+  saveStatus.textContent = message
+}
+
+function showConfigError(error: unknown): void {
+  saveStatus.className = "save-status error"
+  saveStatus.textContent = error instanceof Error ? error.message : "Configuration transfer failed."
+}
+
 showTranslations.addEventListener("change", () => {
+  updateTranslationToggleTooltip()
   void getProviderSettings().then((settings) => saveProviderSettings({
     ...settings,
     showTranslations: showTranslations.checked,
   })).then(() => chrome.runtime.sendMessage({
     type: "set-translation-visibility",
     visible: showTranslations.checked,
-  }))
+  })).catch(() => {
+    // Settings remain persisted; an existing Slack tab may need one reload.
+  })
 })
+
+function updateTranslationToggleTooltip(): void {
+  const label = showTranslations.checked ? "Disable translation" : "Enable translation"
+  translationToggle.title = label
+  showTranslations.setAttribute("aria-label", label)
+}
 
 async function requestProviderPermission(endpoint: string): Promise<void> {
   let url: URL
@@ -281,11 +442,18 @@ quickTranslateButton.addEventListener("click", () => {
     quickSource.focus()
     return
   }
+  const targetLanguage = quickTargetLanguage.value.trim()
+  const backTranslationLanguage = quickBackLanguage.value.trim()
+  if (!targetLanguage || !backTranslationLanguage) {
+    const emptyLanguageInput = !targetLanguage ? quickTargetLanguage : quickBackLanguage
+    emptyLanguageInput.focus()
+    return
+  }
 
   setQuickTranslating(true)
   quickResults.hidden = true
 
-  void sendQuickTranslate(text)
+  void sendQuickTranslate(text, targetLanguage, backTranslationLanguage)
     .then(async (response) => {
       if (!response.ok) throw new Error(response.error)
       quickJapanese.textContent = response.japanese
@@ -316,10 +484,19 @@ quickTranslateButton.addEventListener("click", () => {
     .finally(() => setQuickTranslating(false))
 })
 
-function sendQuickTranslate(text: string): Promise<QuickTranslateResponse> {
+function sendQuickTranslate(
+  text: string,
+  targetLanguage: string,
+  backTranslationLanguage: string,
+): Promise<QuickTranslateResponse> {
   return new Promise((resolve, reject) => {
     try {
-      chrome.runtime.sendMessage({ type: "quick-translate", text }, (response?: QuickTranslateResponse) => {
+      chrome.runtime.sendMessage({
+        type: "quick-translate",
+        text,
+        targetLanguage,
+        backTranslationLanguage,
+      }, (response?: QuickTranslateResponse) => {
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message))
           return
@@ -364,6 +541,22 @@ for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("[d
     void navigator.clipboard.writeText(text ?? "").then(() => {
       button.style.color = "#007a5a"
       window.setTimeout(() => { button.style.color = "#1264a3" }, 700)
+    })
+  })
+}
+
+for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("[data-move]"))) {
+  button.addEventListener("click", () => {
+    const text = button.dataset.move === "japanese" ? quickJapanese.textContent : quickEnglish.textContent
+    if (!text) return
+    chrome.runtime.sendMessage({ type: "append-to-slack-input", text }, (response?: { ok: boolean; error?: string }) => {
+      const moved = !chrome.runtime.lastError && response?.ok
+      button.style.color = moved ? "#007a5a" : "#c4314b"
+      button.title = moved ? "Moved to Slack input" : response?.error ?? "Could not reach Slack"
+      window.setTimeout(() => {
+        button.style.color = ""
+        button.title = "Move to Slack input"
+      }, 1200)
     })
   })
 }

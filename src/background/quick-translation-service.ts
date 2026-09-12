@@ -2,14 +2,21 @@ import { getProviderSettings, type ProviderSettings } from "../shared/settings"
 import { safeEndpoint, writeLog } from "./log-store"
 import { providerFetch } from "./provider-fetch"
 
-export async function quickTranslate(text: string): Promise<{ japanese: string; english: string }> {
+export async function quickTranslate(
+  text: string,
+  targetLanguage: string,
+  backTranslationLanguage: string,
+): Promise<{ japanese: string; english: string }> {
   const settings = await getProviderSettings()
   if (!settings.baseUrl || !settings.apiKey || !settings.model) {
     throw new Error("Configure the AI provider first.")
   }
+  if (!targetLanguage.trim() || !backTranslationLanguage.trim()) {
+    throw new Error("Enter both Quick Translator languages.")
+  }
 
-  const japanese = await translate(text, "Japanese", settings)
-  const english = await translate(japanese, "English", settings)
+  const japanese = await translate(text, targetLanguage.trim(), settings)
+  const english = await translate(japanese, backTranslationLanguage.trim(), settings)
   return { japanese, english }
 }
 
