@@ -1,4 +1,9 @@
-import type { RawSlackMessage, ThreadContextMessage, ThreadContextPlan } from "../shared/types"
+import {
+  normalizeSlackMessageId,
+  type RawSlackMessage,
+  type ThreadContextMessage,
+  type ThreadContextPlan,
+} from "../shared/types"
 
 type StoredContextMessage = RawSlackMessage & {
   id: string
@@ -49,7 +54,9 @@ export async function saveContextMessage(message: RawSlackMessage): Promise<void
       threadKey: entry.threadKey,
       lastActivityAt: Date.now(),
     }
-    await transactionForStore(database, THREAD_STORE_NAME, "readwrite", (store) => store.put(activity))
+    await transactionForStore(database, THREAD_STORE_NAME, "readwrite", (store) =>
+      store.put(activity),
+    )
     await refreshRootActivity(database, message, activity.lastActivityAt)
   }
   writesSinceCleanup += 1
@@ -74,7 +81,10 @@ export async function buildThreadContextPlan(
 ): Promise<ThreadContextPlan> {
   const messages = await getAllThreadMessages(target)
   const fullContext = messages.map(toThreadContextMessage)
-  if (fullContext.length <= MAX_CONTEXT_MESSAGES && countCharacters(fullContext) <= MAX_CONTEXT_CHARACTERS) {
+  if (
+    fullContext.length <= MAX_CONTEXT_MESSAGES &&
+    countCharacters(fullContext) <= MAX_CONTEXT_CHARACTERS
+  ) {
     return { recentMessages: fullContext }
   }
 
@@ -106,7 +116,9 @@ function scheduleSummaryRefresh(
   if (summaryRefreshes.has(threadKey)) return
 
   const refresh = summarize(older)
-    .then((summary) => saveThreadSummary({ threadKey, summary, sourceFingerprint, updatedAt: Date.now() }))
+    .then((summary) =>
+      saveThreadSummary({ threadKey, summary, sourceFingerprint, updatedAt: Date.now() }),
+    )
     .catch(() => {
       // Recent raw context remains available when a summary request fails.
     })
@@ -114,34 +126,45 @@ function scheduleSummaryRefresh(
   summaryRefreshes.set(threadKey, refresh)
 }
 
-export async function getAllThreadMessages(target: RawSlackMessage): Promise<StoredContextMessage[]> {
+export async function getAllThreadMessages(
+  target: RawSlackMessage,
+): Promise<StoredContextMessage[]> {
   const threadKey = getThreadKey(target)
   if (!threadKey || !target.timestamp) return []
 
   const database = await openDatabase()
   const [replies, root] = await Promise.all([
     getByIndex<StoredContextMessage>(database, "threadKey", threadKey),
-    getEntry<StoredContextMessage>(database, messageKey({
-      ...target,
-      messageId: target.threadRootTs!,
-    })),
+    getEntry<StoredContextMessage>(
+      database,
+      messageKey({
+        ...target,
+        messageId: target.threadRootTs!,
+      }),
+    ),
   ])
+  const targetNormalizedId = normalizeSlackMessageId(target.messageId)
   return [...(root ? [root] : []), ...replies]
     .filter((message) => {
-      if (message.messageId === target.messageId || !message.timestamp) return false
+      if (normalizeSlackMessageId(message.messageId) === targetNormalizedId || !message.timestamp)
+        return false
       return true
     })
     .sort((left, right) => compareSlackTimestamp(left.timestamp!, right.timestamp!))
 }
 
-export async function getThreadSummary(threadKey: string): Promise<StoredThreadSummary | undefined> {
+export async function getThreadSummary(
+  threadKey: string,
+): Promise<StoredThreadSummary | undefined> {
   const database = await openDatabase()
   return getEntryFromStore<StoredThreadSummary>(database, SUMMARY_STORE_NAME, threadKey)
 }
 
 export async function saveThreadSummary(summary: StoredThreadSummary): Promise<void> {
   const database = await openDatabase()
-  await transactionForStore(database, SUMMARY_STORE_NAME, "readwrite", (store) => store.put(summary))
+  await transactionForStore(database, SUMMARY_STORE_NAME, "readwrite", (store) =>
+    store.put(summary),
+  )
 }
 
 export function getContextThreadKey(message: RawSlackMessage): string | undefined {
@@ -158,7 +181,9 @@ function selectContextMessages(
 ): ThreadContextMessage[] {
   const root = rootId ? messages.find((message) => message.id === rootId) : undefined
   const remaining = messages.filter((message) => message.id !== root?.id)
-  const selected = root ? [root, ...remaining.slice(-(MAX_CONTEXT_MESSAGES - 1))] : remaining.slice(-MAX_CONTEXT_MESSAGES)
+  const selected = root
+    ? [root, ...remaining.slice(-(MAX_CONTEXT_MESSAGES - 1))]
+    : remaining.slice(-MAX_CONTEXT_MESSAGES)
 
   let usedCharacters = 0
   const context: ThreadContextMessage[] = []
@@ -176,7 +201,9 @@ function countCharacters(messages: ThreadContextMessage[]): number {
 
 function fingerprint(messages: ThreadContextMessage[]): string {
   let hash = 2166136261
-  for (const value of messages.map((message) => `${message.messageId}\u0001${message.sourceText}`).join("\u0002")) {
+  for (const value of messages
+    .map((message) => `${message.messageId}\u0001${message.sourceText}`)
+    .join("\u0002")) {
     hash ^= value.charCodeAt(0)
     hash = Math.imul(hash, 16777619)
   }
@@ -197,7 +224,8 @@ export async function inspectThreadContextByUrl(url: string): Promise<{
   const database = await openDatabase()
   const messages = await getAll<StoredContextMessage>(database, STORE_NAME)
   const target = messages.find(
-    (message) => message.conversationId === parsed.conversationId && message.messageId === parsed.messageId,
+    (message) =>
+      message.conversationId === parsed.conversationId && message.messageId === parsed.messageId,
   )
   if (!target) {
     return {
@@ -230,20 +258,30 @@ export async function inspectThreadContextByUrl(url: string): Promise<{
         message.threadRootTs === targetWithPermalinkThread.threadRootTs &&
         message.threadKey !== repairedThreadKey,
     )
-    await Promise.all(repairCandidates.map((message) => transaction(database, "readwrite", (store) => store.put({
-      ...message,
-      threadKey: repairedThreadKey,
-    }))))
+    await Promise.all(
+      repairCandidates.map((message) =>
+        transaction(database, "readwrite", (store) =>
+          store.put({
+            ...message,
+            threadKey: repairedThreadKey,
+          }),
+        ),
+      ),
+    )
   }
   const threadKey = getThreadKey(targetWithPermalinkThread)
-  const storedThreadMessages = targetWithPermalinkThread.threadRootTs && threadKey
-    ? await getByIndex<StoredContextMessage>(database, "threadKey", threadKey)
-    : []
+  const storedThreadMessages =
+    targetWithPermalinkThread.threadRootTs && threadKey
+      ? await getByIndex<StoredContextMessage>(database, "threadKey", threadKey)
+      : []
   const storedRoot = targetWithPermalinkThread.threadRootTs
-    ? await getEntry<StoredContextMessage>(database, messageKey({
-      ...targetWithPermalinkThread,
-      messageId: targetWithPermalinkThread.threadRootTs,
-    }))
+    ? await getEntry<StoredContextMessage>(
+        database,
+        messageKey({
+          ...targetWithPermalinkThread,
+          messageId: targetWithPermalinkThread.threadRootTs,
+        }),
+      )
     : undefined
 
   return {
@@ -254,15 +292,22 @@ export async function inspectThreadContextByUrl(url: string): Promise<{
     context: selectContextMessages(
       [...(storedRoot ? [storedRoot] : []), ...storedThreadMessages]
         .filter((message) => {
-          if (message.messageId === targetWithPermalinkThread.messageId || !message.timestamp) return false
+          if (message.messageId === targetWithPermalinkThread.messageId || !message.timestamp)
+            return false
           return true
         })
-        .filter((message, index, messages) => messages.findIndex((item) => item.id === message.id) === index)
+        .filter(
+          (message, index, messages) =>
+            messages.findIndex((item) => item.id === message.id) === index,
+        )
         .sort((left, right) => compareSlackTimestamp(left.timestamp!, right.timestamp!)),
       storedRoot?.id,
     ),
     storedThreadMessages: [...(storedRoot ? [storedRoot] : []), ...storedThreadMessages]
-      .filter((message, index, messages) => messages.findIndex((item) => item.id === message.id) === index)
+      .filter(
+        (message, index, messages) =>
+          messages.findIndex((item) => item.id === message.id) === index,
+      )
       .sort((left, right) => compareSlackTimestamp(left.timestamp ?? "0", right.timestamp ?? "0"))
       .map(toThreadContextMessage),
     threadRootTs: targetWithPermalinkThread.threadRootTs,
@@ -275,6 +320,8 @@ export async function inspectThreadContextByUrl(url: string): Promise<{
 
 function getThreadKey(message: RawSlackMessage): string | undefined {
   const rootTimestamp = message.threadRootTs
+    ? normalizeSlackMessageId(message.threadRootTs)
+    : undefined
   if (!rootTimestamp || !message.conversationId) return undefined
   return [message.workspaceId, message.conversationId, rootTimestamp]
     .filter((part): part is string => Boolean(part))
@@ -282,7 +329,11 @@ function getThreadKey(message: RawSlackMessage): string | undefined {
 }
 
 function messageKey(message: RawSlackMessage): string {
-  return [message.workspaceId ?? "", message.conversationId ?? "", message.messageId].join(":")
+  return [
+    message.workspaceId ?? "",
+    message.conversationId ?? "",
+    normalizeSlackMessageId(message.messageId),
+  ].join(":")
 }
 
 function compareSlackTimestamp(left: string, right: string): number {
@@ -298,11 +349,13 @@ function toThreadContextMessage(message: StoredContextMessage): ThreadContextMes
   }
 }
 
-function parseSlackPermalink(url: string): {
-  conversationId: string
-  messageId: string
-  threadRootTs?: string
-} | undefined {
+function parseSlackPermalink(url: string):
+  | {
+      conversationId: string
+      messageId: string
+      threadRootTs?: string
+    }
+  | undefined {
   try {
     const parsed = new URL(url)
     const match = parsed.pathname.match(/\/archives\/([^/]+)\/p(\d{10})(\d{6})/)
@@ -373,7 +426,11 @@ function getEntry<T>(database: IDBDatabase, key: IDBValidKey): Promise<T | undef
   })
 }
 
-function getEntryFromStore<T>(database: IDBDatabase, storeName: string, key: IDBValidKey): Promise<T | undefined> {
+function getEntryFromStore<T>(
+  database: IDBDatabase,
+  storeName: string,
+  key: IDBValidKey,
+): Promise<T | undefined> {
   return new Promise((resolve, reject) => {
     const request = database.transaction(storeName, "readonly").objectStore(storeName).get(key)
     request.onerror = () => reject(request.error)
@@ -383,7 +440,11 @@ function getEntryFromStore<T>(database: IDBDatabase, storeName: string, key: IDB
 
 function getByIndex<T>(database: IDBDatabase, indexName: string, key: IDBValidKey): Promise<T[]> {
   return new Promise((resolve, reject) => {
-    const request = database.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).index(indexName).getAll(key)
+    const request = database
+      .transaction(STORE_NAME, "readonly")
+      .objectStore(STORE_NAME)
+      .index(indexName)
+      .getAll(key)
     request.onerror = () => reject(request.error)
     request.onsuccess = () => resolve(request.result as T[])
   })
@@ -402,27 +463,75 @@ async function refreshRootActivity(
 }
 
 async function cleanupInactiveContext(database: IDBDatabase): Promise<void> {
-  const cutoff = Date.now() - CONTEXT_RETENTION_MS
-  const threads = await getAll<StoredContextThread>(database, THREAD_STORE_NAME)
-  const expiredThreadKeys = threads
-    .filter((thread) => thread.lastActivityAt < cutoff)
-    .map((thread) => thread.threadKey)
+  try {
+    const cutoff = Date.now() - CONTEXT_RETENTION_MS
+    const expiredThreadKeys = new Set<string>()
 
-  for (const threadKey of expiredThreadKeys) {
-    const entries = await getByIndex<StoredContextMessage>(database, "threadKey", threadKey)
-    for (const entry of entries) {
-      await transaction(database, "readwrite", (store) => store.delete(entry.id))
-    }
-    await transactionForStore(database, THREAD_STORE_NAME, "readwrite", (store) => store.delete(threadKey))
-  }
+    await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction(THREAD_STORE_NAME, "readwrite")
+      const store = tx.objectStore(THREAD_STORE_NAME)
+      const request = store.openCursor()
+      request.onerror = () => reject(request.error)
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (cursor) {
+          const thread = cursor.value as StoredContextThread
+          if (thread.lastActivityAt < cutoff) {
+            expiredThreadKeys.add(thread.threadKey)
+            cursor.delete()
+          }
+          cursor.continue()
+        } else {
+          resolve()
+        }
+      }
+    })
 
-  // Standalone messages and roots never associated with a known active thread
-  // use their own last-observed time as the retention fallback.
-  const messages = await getAll<StoredContextMessage>(database, STORE_NAME)
-  for (const message of messages) {
-    if (!message.threadKey && message.observedAt < cutoff) {
-      await transaction(database, "readwrite", (store) => store.delete(message.id))
+    if (expiredThreadKeys.size > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = database.transaction(SUMMARY_STORE_NAME, "readwrite")
+        const store = tx.objectStore(SUMMARY_STORE_NAME)
+        const request = store.openCursor()
+        request.onerror = () => reject(request.error)
+        request.onsuccess = () => {
+          const cursor = request.result
+          if (cursor) {
+            const summary = cursor.value as StoredThreadSummary
+            if (expiredThreadKeys.has(summary.threadKey)) {
+              cursor.delete()
+            }
+            cursor.continue()
+          } else {
+            resolve()
+          }
+        }
+      })
     }
+
+    await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction(STORE_NAME, "readwrite")
+      const store = tx.objectStore(STORE_NAME)
+      const request = store.openCursor()
+      request.onerror = () => reject(request.error)
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (cursor) {
+          const message = cursor.value as StoredContextMessage
+          const isExpiredThreadMessage = Boolean(
+            message.threadKey && expiredThreadKeys.has(message.threadKey),
+          )
+          const isExpiredStandalone = !message.threadKey && message.observedAt < cutoff
+          if (isExpiredThreadMessage || isExpiredStandalone) {
+            cursor.delete()
+          }
+          cursor.continue()
+        } else {
+          resolve()
+        }
+      }
+    })
+  } catch {
+    // Periodic background cleanup failure should not affect active context operations
   }
 }
 

@@ -1,0 +1,144 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/inter";
+
+/*
+ * Slacktor popup theme.
+ *
+ * Color tokens mirror src/shared/theme.ts (SLACKTOR_COLORS) — that module is
+ * the version the vanilla content-script overlay imports, since it cannot
+ * use Tailwind. Keep both in sync when changing brand colors.
+ */
+:root {
+  --background: #ffffff;
+  --foreground: #1d1c1d;
+
+  --card: #ffffff;
+  --card-foreground: #1d1c1d;
+
+  --popover: #ffffff;
+  --popover-foreground: #1d1c1d;
+
+  --primary: #1264a3;
+  --primary-foreground: #ffffff;
+
+  --secondary: #f1f3f5;
+  --secondary-foreground: #1d1c1d;
+
+  --muted: #f8f8f8;
+  --muted-foreground: #616061;
+
+  --accent: #eaf4fb;
+  --accent-foreground: #0b4f79;
+
+  --destructive: #c4314b;
+  --destructive-foreground: #ffffff;
+
+  --success: #007a5a;
+  --success-foreground: #ffffff;
+
+  --warning: #9b6a00;
+  --warning-foreground: #ffffff;
+
+  /* Brand aubergine is intentionally scoped to the logo mark only. */
+  --brand: #4a154b;
+  --brand-foreground: #ffffff;
+
+  --border: #e2e2e2;
+  --input: #e2e2e2;
+  --ring: #1264a3;
+
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+  }
+  /* Radix primitives (Button, Switch, Checkbox, Tabs, Select trigger, Dialog
+     close, ...) all render a native <button>. Browsers default that to an
+     arrow cursor, so restore the expected pointer cursor everywhere. */
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* Popup window sizing: fixed footprint, internal scroll per tab instead of the
+   old 350px -> 600px view-swap resize. Must match the root div's h-150 w-90
+   in App.tsx. overflow: hidden keeps the browser from ever adding its own
+   page-level scrollbar (which would steal width from the fixed 360px popup
+   and show up as a stray gap) — all scrolling happens in the inner
+   .overflow-y-auto regions instead. */
+html,
+body,
+#root {
+  width: 360px;
+  height: 600px;
+  overflow: hidden;
+}
+/* Radix Dialog wraps its content in react-remove-scroll, which locks body
+   scrolling and injects an inline padding-right/margin-right on <body> to
+   compensate for the scrollbar it assumes it's hiding. Our popup has no
+   page-level scrollbar to compensate for, so that inline style just shows up
+   as a stray gap on the right of #root whenever a dialog opens. Pin it to 0. */
+body {
+  padding-right: 0 !important;
+  margin-right: 0 !important;
+}
+body.preload,
+body.preload *,
+body.preload *::before,
+body.preload *::after {
+  animation: none !important;
+  transition: none !important;
+}

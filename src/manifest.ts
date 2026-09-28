@@ -1,17 +1,15 @@
 import type { ManifestV3Export } from "@crxjs/vite-plugin"
 
+import pkg from "../package.json"
+
 const manifest: ManifestV3Export = {
   manifest_version: 3,
   name: "Slacktor",
-  version: "0.1.5",
+  version: pkg.version,
   description: "AI translation overlay for Slack Web.",
   permissions: ["storage", "clipboardRead", "clipboardWrite", "scripting"],
   host_permissions: ["https://app.slack.com/*"],
-  optional_host_permissions: [
-    "https://*/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*",
-  ],
+  optional_host_permissions: ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   background: {
     service_worker: "src/background/service-worker.ts",
     type: "module",

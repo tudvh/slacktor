@@ -1,5 +1,6 @@
-import sharp from "sharp"
 import { mkdir } from "node:fs/promises"
+
+import sharp from "sharp"
 
 const sourceIcon = "store-assets/slacktor-source-icon.png"
 

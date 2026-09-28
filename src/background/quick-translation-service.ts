@@ -47,7 +47,8 @@ async function translate(
         messages: [
           {
             role: "system",
-            content: "Translate the provided text accurately. Preserve its original vibe, intent, emotional tone, names, URLs, code, and formatting. Make the wording naturally polite in the target language without changing the meaning or intensity. Return only the translation.",
+            content:
+              "Translate the provided text accurately. Preserve its original vibe, intent, emotional tone, names, URLs, code, and formatting. Make the wording naturally polite in the target language without changing the meaning or intensity. Return only the translation.",
           },
           {
             role: "user",
@@ -58,20 +59,45 @@ async function translate(
       }),
     })
   } catch (error) {
-    await writeLog({ level: "error", scope: "quick-translation", message: error instanceof Error ? error.message : "Quick translation network request failed", details: { endpoint: safeEndpoint(endpoint), model: settings.model, targetLanguage } })
+    await writeLog({
+      level: "error",
+      scope: "quick-translation",
+      message: error instanceof Error ? error.message : "Quick translation network request failed",
+      details: { endpoint: safeEndpoint(endpoint), model: settings.model, targetLanguage },
+    })
     throw error
   }
 
   if (!response.ok) {
     const detail = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 240)
     const error = `AI request failed (${response.status})${detail ? `: ${detail}` : ""}`
-    await writeLog({ level: "error", scope: "quick-translation", message: error, details: { endpoint: safeEndpoint(endpoint), model: settings.model, targetLanguage, status: response.status } })
+    await writeLog({
+      level: "error",
+      scope: "quick-translation",
+      message: error,
+      details: {
+        endpoint: safeEndpoint(endpoint),
+        model: settings.model,
+        targetLanguage,
+        status: response.status,
+      },
+    })
     throw new Error(error)
   }
 
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> }
   const translation = data.choices?.[0]?.message?.content?.trim()
   if (!translation) throw new Error(`AI provider returned no ${targetLanguage} translation.`)
-  await writeLog({ level: "info", scope: "quick-translation", message: "Quick translation step completed", details: { endpoint: safeEndpoint(endpoint), model: settings.model, targetLanguage, status: response.status } })
+  await writeLog({
+    level: "info",
+    scope: "quick-translation",
+    message: "Quick translation step completed",
+    details: {
+      endpoint: safeEndpoint(endpoint),
+      model: settings.model,
+      targetLanguage,
+      status: response.status,
+    },
+  })
   return translation
 }

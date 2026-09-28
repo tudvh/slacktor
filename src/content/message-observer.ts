@@ -1,3 +1,10 @@
+import type { PublicSettings } from "../shared/messages"
+import type { AppendToSlackInputResponse, ContentRequest } from "../shared/messages"
+import {
+  normalizeSlackMessageId,
+  type RawSlackMessage,
+  type ThreadContextPlan,
+} from "../shared/types"
 import {
   extractMessage,
   findClosestMessageNode,
@@ -5,11 +12,8 @@ import {
   getTranslationAnchor,
   isMessageCandidate,
 } from "./slack-adapter"
-import { renderPlaceholder } from "./translation-renderer"
 import type { TranslationController } from "./translation-renderer"
-import type { PublicSettings } from "../shared/messages"
-import type { AppendToSlackInputResponse, ContentRequest } from "../shared/messages"
-import type { RawSlackMessage, ThreadContextPlan } from "../shared/types"
+import { renderPlaceholder } from "./translation-renderer"
 
 let settings: PublicSettings = {
   extensionEnabled: true,
@@ -42,11 +46,15 @@ const queuedTranslations = new Map<string, QueuedTranslation>()
 const controllers = new Map<string, Set<TranslationController>>()
 const completedTranslationsByMessage = new Map<string, string>()
 const stoppedMessageKeys = new Set<string>()
-const recentMessageAliases = new Map<string, {
-  messageKey: string
-  timestamp: number
-  lastSeenAt: number
-}>()
+const recentMessageAliases = new Map<
+  string,
+  {
+    messageKey: string
+    authorMemberId?: string
+    timestamp: number
+    lastSeenAt: number
+  }
+>()
 const MESSAGE_ALIAS_WINDOW_MS = 15_000
 const NEW_MESSAGE_WINDOW_SECONDS = 30
 let queueSequence = 0
@@ -75,10 +83,29 @@ async function inspect(node: HTMLElement): Promise<void> {
       // Persist in the background. Rendering and queueing must not wait for an
       // IndexedDB write when Slack initially loads a large channel.
       const persisted = sendMessageSafely({ type: "observe-message", message })
-      const controller = renderPlaceholder(node, anchor, message, async () => {
-        await persisted
-        return await sendMessageSafely<ThreadContextPlan>({ type: "get-thread-context", message }) ?? { recentMessages: [] }
-      })
+      const controller = renderPlaceholder(
+        node,
+        anchor,
+        message,
+        async () => {
+          await persisted
+          return (
+            (await sendMessageSafely<ThreadContextPlan>({
+              type: "get-thread-context",
+              message,
+            })) ?? { recentMessages: [] }
+          )
+        },
+        (translation) => {
+          completedTranslationsByMessage.set(messageKey, translation)
+          const messageControllers = controllers.get(messageKey)
+          if (messageControllers) {
+            for (const ctrl of messageControllers) {
+              if (ctrl !== controller) ctrl.applyTranslation(translation)
+            }
+          }
+        },
+      )
       if (controller) {
         const messageControllers = controllers.get(messageKey) ?? new Set<TranslationController>()
         messageControllers.add(controller)
@@ -86,11 +113,14 @@ async function inspect(node: HTMLElement): Promise<void> {
         const completedTranslation = completedTranslationsByMessage.get(messageKey)
         if (completedTranslation !== undefined) controller.applyTranslation(completedTranslation)
         else if (stoppedMessageKeys.has(messageKey)) controller.markStopped()
+        else if (message.skipAutoTranslateReason)
+          controller.markSkipped(message.skipAutoTranslateReason)
       }
       if (
         controller &&
         !completedTranslationsByMessage.has(messageKey) &&
         !stoppedMessageKeys.has(messageKey) &&
+        !message.skipAutoTranslateReason &&
         settings.configured &&
         settings.autoTranslate
       ) {
@@ -125,16 +155,19 @@ function prioritize(job: QueuedTranslation): void {
     publishQueueStats()
   }
 
-  void primaryController.runUrgent().then((translation) => {
-    if (translation === undefined || generation !== job.requestGeneration) return
-    completedTranslationsByMessage.set(job.messageId, translation)
-    for (const controller of job.targets.keys()) {
-      if (controller !== primaryController) controller.applyTranslation(translation)
-    }
-  }).finally(() => {
-    if (job.result || generation !== job.requestGeneration) return
-    finishTranslationJob(job)
-  })
+  void primaryController
+    .runUrgent()
+    .then((translation) => {
+      if (translation === undefined || generation !== job.requestGeneration) return
+      completedTranslationsByMessage.set(job.messageId, translation)
+      for (const controller of job.targets.keys()) {
+        if (controller !== primaryController) controller.applyTranslation(translation)
+      }
+    })
+    .finally(() => {
+      if (job.result || generation !== job.requestGeneration) return
+      finishTranslationJob(job)
+    })
 }
 
 function runAutoTranslationQueue(): void {
@@ -149,15 +182,20 @@ function runAutoTranslationQueue(): void {
     activeTranslations += 1
     publishQueueStats()
     const generation = job.requestGeneration
-    const [primaryController, run] = job.targets.entries().next().value as [TranslationController, (priority?: boolean) => Promise<string | undefined>]
+    const [primaryController, run] = job.targets.entries().next().value as [
+      TranslationController,
+      (priority?: boolean) => Promise<string | undefined>,
+    ]
     job.result = run(job.automaticPriority)
-    void job.result.then((translation) => {
-      if (translation === undefined || generation !== job.requestGeneration) return
-      completedTranslationsByMessage.set(job.messageId, translation)
-      for (const controller of job.targets.keys()) {
-        if (controller !== primaryController) controller.applyTranslation(translation)
-      }
-    }).finally(() => finishTranslationJob(job))
+    void job.result
+      .then((translation) => {
+        if (translation === undefined || generation !== job.requestGeneration) return
+        completedTranslationsByMessage.set(job.messageId, translation)
+        for (const controller of job.targets.keys()) {
+          if (controller !== primaryController) controller.applyTranslation(translation)
+        }
+      })
+      .finally(() => finishTranslationJob(job))
   }
 }
 
@@ -196,47 +234,69 @@ export function startMessageObserver(): MutationObserver {
     childList: true,
     subtree: true,
   })
-  window.addEventListener("pagehide", () => {
-    observer.disconnect()
-    if (queueRunTimer !== undefined) window.clearTimeout(queueRunTimer)
-    cancelAllTranslationJobs()
-    autoTranslationQueue.length = 0
-    queuedTranslations.clear()
-    publishQueueStats()
-  }, { once: true })
+  window.addEventListener(
+    "pagehide",
+    () => {
+      observer.disconnect()
+      if (queueRunTimer !== undefined) window.clearTimeout(queueRunTimer)
+      cancelAllTranslationJobs()
+      autoTranslationQueue.length = 0
+      queuedTranslations.clear()
+      publishQueueStats()
+    },
+    { once: true },
+  )
 
   chrome.runtime.onMessage.addListener((request: ContentRequest, _sender, sendResponse) => {
     if (request.type === "retranslate-visible") {
       if (!settings.extensionEnabled) {
-        sendResponse({ ok: false, queued: 0 })
+        sendResponse?.({ ok: false, queued: 0 })
         return
       }
-      let queued = 0
-      for (const node of findMessageNodes()) {
-        const message = extractMessage(node)
-        if (!message || !node.getBoundingClientRect().height) continue
-        const messageKey = resolveMessageKey(message)
-        stoppedMessageKeys.delete(messageKey)
-        const messageControllers = controllers.get(messageKey)
-        if (!messageControllers) continue
-        for (const controller of messageControllers) {
-          if (!controller.isConnected()) {
-            messageControllers.delete(controller)
-            continue
-          }
-          enqueueTranslation(messageKey, controller, controller.retranslate, message, isInThreadPanel(node))
-          queued += 1
-        }
-        if (messageControllers.size === 0) controllers.delete(messageKey)
+      if (request.force) {
+        completedTranslationsByMessage.clear()
       }
-      publishQueueStats()
-      runAutoTranslationQueue()
-      sendResponse({ ok: queued > 0, queued })
-      return
+      void loadSettingsAndInspect().then(() => {
+        let queued = 0
+        for (const node of findMessageNodes()) {
+          const message = extractMessage(node)
+          if (!message || !node.getBoundingClientRect().height) continue
+          const messageKey = resolveMessageKey(message)
+          stoppedMessageKeys.delete(messageKey)
+          const messageControllers = controllers.get(messageKey)
+          if (!messageControllers) continue
+          for (const controller of messageControllers) {
+            if (!controller.isConnected()) {
+              messageControllers.delete(controller)
+              continue
+            }
+            if (message.skipAutoTranslateReason) {
+              controller.markSkipped(message.skipAutoTranslateReason)
+              continue
+            }
+            if (!settings.autoTranslate && !controller.isTranslated?.()) {
+              continue
+            }
+            enqueueTranslation(
+              messageKey,
+              controller,
+              controller.retranslate,
+              message,
+              isInThreadPanel(node),
+            )
+            queued += 1
+          }
+          if (messageControllers.size === 0) controllers.delete(messageKey)
+        }
+        publishQueueStats()
+        runAutoTranslationQueue()
+        sendResponse?.({ ok: queued > 0, queued })
+      })
+      return true
     }
 
     if (request.type === "terminate-slack-translations") {
-      const stoppedCount = autoTranslationQueue.length
+      const _stoppedCount = autoTranslationQueue.length
       for (const job of autoTranslationQueue) {
         stoppedMessageKeys.add(job.messageId)
         queuedTranslations.delete(job.messageId)
@@ -259,8 +319,10 @@ export function startMessageObserver(): MutationObserver {
         cancelAllTranslationJobs()
         autoTranslationQueue.length = 0
         queuedTranslations.clear()
-        for (const host of Array.from(document.querySelectorAll("[data-slacktor-translation]"))) host.remove()
-        for (const node of Array.from(document.querySelectorAll("[data-slacktor-rendered]"))) node.removeAttribute("data-slacktor-rendered")
+        for (const host of Array.from(document.querySelectorAll("[data-slacktor-translation]")))
+          host.remove()
+        for (const node of Array.from(document.querySelectorAll("[data-slacktor-rendered]")))
+          node.removeAttribute("data-slacktor-rendered")
         controllers.clear()
         completedTranslationsByMessage.clear()
         publishQueueStats()
@@ -269,7 +331,10 @@ export function startMessageObserver(): MutationObserver {
 
     if (request.type === "append-to-slack-input") {
       if (!settings.extensionEnabled) {
-        sendResponse({ ok: false, error: "Slacktor is disabled." } satisfies AppendToSlackInputResponse)
+        sendResponse({
+          ok: false,
+          error: "Slacktor is disabled.",
+        } satisfies AppendToSlackInputResponse)
         return
       }
       sendResponse(appendToSlackInput(request.text))
@@ -289,12 +354,16 @@ function appendToSlackInput(text: string): AppendToSlackInputResponse {
     "[data-qa='message_input'] [contenteditable='plaintext-only']",
     "[aria-label*='message' i][role='textbox'][contenteditable='true']",
   ].join(", ")
-  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+  const activeElement =
+    document.activeElement instanceof HTMLElement ? document.activeElement : undefined
   const focusedComposer = activeElement?.matches(selector)
     ? activeElement
-    : activeElement?.closest<HTMLElement>("[data-qa='message_input']")?.querySelector<HTMLElement>("[contenteditable='true'], [contenteditable='plaintext-only']")
-  const composer = focusedComposer ?? Array.from(document.querySelectorAll<HTMLElement>(selector))
-    .find(isWritableComposer)
+    : activeElement
+        ?.closest<HTMLElement>("[data-qa='message_input']")
+        ?.querySelector<HTMLElement>("[contenteditable='true'], [contenteditable='plaintext-only']")
+  const composer =
+    focusedComposer ??
+    Array.from(document.querySelectorAll<HTMLElement>(selector)).find(isWritableComposer)
   if (!composer) return { ok: false, error: "No visible Slack composer was found." }
 
   const previousText = composer.textContent ?? ""
@@ -319,20 +388,24 @@ function appendToSlackInput(text: string): AppendToSlackInputResponse {
   range.collapse(true)
   selection.removeAllRanges()
   selection.addRange(range)
-  composer.dispatchEvent(new InputEvent("input", {
-    bubbles: true,
-    inputType: "insertText",
-    data: text,
-  }))
+  composer.dispatchEvent(
+    new InputEvent("input", {
+      bubbles: true,
+      inputType: "insertText",
+      data: text,
+    }),
+  )
   return (composer.textContent ?? "") !== previousText
     ? { ok: true }
     : { ok: false, error: "Slack rejected the inserted text." }
 }
 
 function isWritableComposer(candidate: HTMLElement): boolean {
-  return candidate.getClientRects().length > 0
-    && candidate.getAttribute("aria-disabled") !== "true"
-    && candidate.getAttribute("contenteditable") !== "false"
+  return (
+    candidate.getClientRects().length > 0 &&
+    candidate.getAttribute("aria-disabled") !== "true" &&
+    candidate.getAttribute("contenteditable") !== "false"
+  )
 }
 
 function getMessageKey(message: RawSlackMessage): string {
@@ -348,41 +421,51 @@ function resolveMessageKey(message: RawSlackMessage): string {
   // metadata. For newly sent messages, source text is the stable bridge. The
   // recency guard prevents historical messages with identical text from being
   // merged when Slack virtualizes or initially scans a channel.
-  const aliasKey = message.sourceText
+  // Scope by workspace and conversation to prevent identical short messages
+  // in different channels or workspaces from colliding.
+  const aliasKey = [
+    message.workspaceId ?? "",
+    message.conversationId ?? "",
+    message.sourceText,
+  ].join(":")
   const timestamp = Number.parseFloat(message.timestamp ?? "")
   const now = Date.now()
+  const authorMemberId = message.author.status === "resolved" ? message.author.memberId : undefined
   const existing = recentMessageAliases.get(aliasKey)
   const nowSeconds = now / 1000
-  const isRecentTimestamp = (value: number) => Number.isFinite(value) && Math.abs(nowSeconds - value) <= NEW_MESSAGE_WINDOW_SECONDS
+  const isRecentTimestamp = (value: number) =>
+    Number.isFinite(value) && Math.abs(nowSeconds - value) <= NEW_MESSAGE_WINDOW_SECONDS
+
+  const isAuthorMismatch = Boolean(
+    existing?.authorMemberId && authorMemberId && existing.authorMemberId !== authorMemberId,
+  )
 
   if (
     existing &&
+    !isAuthorMismatch &&
     now - existing.lastSeenAt <= MESSAGE_ALIAS_WINDOW_MS &&
     (isRecentTimestamp(timestamp) || isRecentTimestamp(existing.timestamp))
   ) {
     existing.lastSeenAt = now
+    if (!existing.authorMemberId && authorMemberId) {
+      existing.authorMemberId = authorMemberId
+    }
     return existing.messageKey
   }
 
   if (!Number.isFinite(timestamp)) {
-    recentMessageAliases.set(aliasKey, { messageKey, timestamp, lastSeenAt: now })
+    recentMessageAliases.set(aliasKey, { messageKey, authorMemberId, timestamp, lastSeenAt: now })
     return messageKey
   }
   if (!isRecentTimestamp(timestamp)) return messageKey
 
-  recentMessageAliases.set(aliasKey, { messageKey, timestamp, lastSeenAt: now })
+  recentMessageAliases.set(aliasKey, { messageKey, authorMemberId, timestamp, lastSeenAt: now })
   if (recentMessageAliases.size > 500) {
     for (const [key, value] of recentMessageAliases) {
       if (now - value.lastSeenAt > MESSAGE_ALIAS_WINDOW_MS) recentMessageAliases.delete(key)
     }
   }
   return messageKey
-}
-
-function normalizeSlackMessageId(value: string): string {
-  const permalinkMatch = value.match(/^p(\d{10})(\d{6})$/)
-  if (permalinkMatch) return `${permalinkMatch[1]}.${permalinkMatch[2]}`
-  return value
 }
 
 function enqueueTranslation(
@@ -392,6 +475,11 @@ function enqueueTranslation(
   message: RawSlackMessage,
   threadPanelPriority: boolean,
 ): void {
+  if (message.skipAutoTranslateReason) {
+    controller.markSkipped(message.skipAutoTranslateReason)
+    return
+  }
+
   const existing = queuedTranslations.get(messageId)
   if (existing) {
     if (existing.targets.has(controller)) return
@@ -403,8 +491,7 @@ function enqueueTranslation(
       void existing.result?.then((translation) => {
         if (translation !== undefined) controller.applyTranslation(translation)
       })
-    }
-    else controller.markQueued(() => prioritize(existing))
+    } else controller.markQueued(() => prioritize(existing))
     sortAutoTranslationQueue()
     return
   }
@@ -455,7 +542,8 @@ function isRecentMessage(message: RawSlackMessage): boolean {
 function sortAutoTranslationQueue(): void {
   autoTranslationQueue.sort((left, right) => {
     if (left.manualPriority !== right.manualPriority) return left.manualPriority ? -1 : 1
-    if (left.threadPanelPriority !== right.threadPanelPriority) return left.threadPanelPriority ? -1 : 1
+    if (left.threadPanelPriority !== right.threadPanelPriority)
+      return left.threadPanelPriority ? -1 : 1
     if (left.recentPriority !== right.recentPriority) return left.recentPriority ? -1 : 1
     if (left.timestamp !== right.timestamp) return right.timestamp - left.timestamp
     return left.sequence - right.sequence
@@ -541,14 +629,15 @@ function applyTranslationVisibility(visible: boolean): void {
   if (!style) {
     style = document.createElement("style")
     style.id = "slacktor-visibility-style"
-    style.textContent = ".slacktor-hide-translations [data-slacktor-translation] { display: none !important; }"
+    style.textContent =
+      ".slacktor-hide-translations [data-slacktor-translation] { display: none !important; }"
     document.documentElement.append(style)
   }
 }
 
 async function sendMessageSafely<T>(message: unknown): Promise<T | undefined> {
   try {
-    return await chrome.runtime.sendMessage(message) as T | undefined
+    return (await chrome.runtime.sendMessage(message)) as T | undefined
   } catch (error) {
     if (isContextInvalidated(error)) return undefined
     throw error
