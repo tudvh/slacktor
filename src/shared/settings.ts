@@ -13,13 +13,13 @@ export type ProviderSettings = {
 const SETTINGS_KEY = "provider-settings"
 
 export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
-  extensionEnabled: true,
+  extensionEnabled: false,
   baseUrl: "",
   apiKey: "",
   model: "",
   targetLanguage: "Vietnamese",
   customPrompt: "",
-  autoTranslate: false,
+  autoTranslate: true,
   showTranslations: true,
   privacyConsent: false,
 }

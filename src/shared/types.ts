@@ -14,6 +14,7 @@ export type RawSlackMessage = {
   isBot: boolean
   isSystemMessage: boolean
   isDirectMessage: boolean
+  skipAutoTranslateReason?: string
 }
 
 export type ThreadContextMessage = {
@@ -26,4 +27,9 @@ export type ThreadContextMessage = {
 export type ThreadContextPlan = {
   summary?: string
   recentMessages: ThreadContextMessage[]
+}
+
+export function normalizeSlackMessageId(value: string): string {
+  const permalinkMatch = value.match(/^p(\d{10})(\d{6})$/)
+  return permalinkMatch ? `${permalinkMatch[1]}.${permalinkMatch[2]}` : value
 }
