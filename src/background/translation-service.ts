@@ -1,16 +1,16 @@
-import type { RawSlackMessage, ThreadContextPlan } from "../shared/types"
 import { getProviderSettings } from "../shared/settings"
-import {
-  cacheTranslation,
-  getCachedTranslation,
-} from "./translation-cache"
+import type { RawSlackMessage, ThreadContextPlan } from "../shared/types"
 import { safeEndpoint, writeLog } from "./log-store"
 import { providerFetch } from "./provider-fetch"
+import { cacheTranslation, getCachedTranslation } from "./translation-cache"
 import { countLlmRequest, countTranslatedMessages } from "./usage-stats"
 
 const MAX_ATTEMPTS = 2
 const inFlightTranslations = new Map<string, Promise<string>>()
-const recentTranslations = new Map<string, { translation: string; completedAt: number; timestamp: number }>()
+const recentTranslations = new Map<
+  string,
+  { translation: string; completedAt: number; timestamp: number }
+>()
 const RECENT_TRANSLATION_DEDUPE_MS = 8_000
 const BATCH_WINDOW_MS = 2_000
 const MAX_BATCH_INPUT_TOKENS = 25_000
@@ -73,7 +73,9 @@ export async function translateMessage(
     if (
       recent &&
       Date.now() - recent.completedAt <= RECENT_TRANSLATION_DEDUPE_MS &&
-      (!Number.isFinite(timestamp) || !Number.isFinite(recent.timestamp) || Math.abs(timestamp - recent.timestamp) <= 1)
+      (!Number.isFinite(timestamp) ||
+        !Number.isFinite(recent.timestamp) ||
+        Math.abs(timestamp - recent.timestamp) <= 1)
     ) {
       return recent.translation
     }
@@ -233,14 +235,17 @@ function partitionBatch(items: TranslationBatchItem[]): TranslationBatchItem[][]
 }
 
 function hasCompatibleProvider(left: TranslationBatchItem, right: TranslationBatchItem): boolean {
-  return left.settings.baseUrl === right.settings.baseUrl &&
+  return (
+    left.settings.baseUrl === right.settings.baseUrl &&
     left.settings.apiKey === right.settings.apiKey &&
     left.settings.model === right.settings.model &&
     left.settings.customPrompt === right.settings.customPrompt
+  )
 }
 
 function getEstimatedBatchInputTokens(items: TranslationRequestItem[]): number {
-  const inputBytes = textEncoder.encode(buildBatchSystemPrompt(items[0]?.settings.customPrompt ?? "")).byteLength +
+  const inputBytes =
+    textEncoder.encode(buildBatchSystemPrompt(items[0]?.settings.customPrompt ?? "")).byteLength +
     textEncoder.encode(buildBatchPrompt(items)).byteLength
   return Math.ceil(inputBytes / APPROXIMATE_BYTES_PER_TOKEN)
 }
@@ -269,12 +274,53 @@ function pruneRecentTranslations(): void {
   }
 }
 
+/**
+ * Clickable element masking pattern:
+ * 1. Markdown links: [label](protocol://url)
+ *    Matches [label](slack://mention), [label](slack://channel), [label](slack://link), [label](slack://email), [label](https://...)
+ * 2. Raw URLs: https?://...
+ * 3. Raw emails: user@domain.com
+ * 4. Broadcast mentions: @channel, @here, @everyone
+ * 5. Escaped quote prefixes at line start: \> or \>>
+ */
+const CLICKABLE_MASK_REGEX =
+  /(?<=^|\n)[ \t\u00A0]*\\>+[ \t\u00A0]?|\[((?:\[[^\]\n]*\]|[^\]\n])+)\]\(((?:https?:\/\/|mailto:|slack:\/\/)[^\s)<>"]+)\)|https?:\/\/[^\s)<>"'`]+|(?:mailto:)?[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|@(?:channel|here|everyone)\b/g
+
+export function maskClickableElements(text: string, maskMap: Map<string, string>): string {
+  if (!text) return text
+  return text.replace(CLICKABLE_MASK_REGEX, (match) => {
+    const placeholder = `__SLKT_${maskMap.size}__`
+    maskMap.set(placeholder, match)
+    return placeholder
+  })
+}
+
+export function unmaskClickableElements(text: string, maskMap: Map<string, string>): string {
+  if (!text || maskMap.size === 0) return text
+  return text.replace(/__\s*SLKT_(\d+)\s*__/gi, (_match, id: string) => {
+    const key = `__SLKT_${id}__`
+    return maskMap.get(key) ?? _match
+  })
+}
+
+function sanitizeContextText(text: string): string {
+  return text.replace(/\[((?:\[[^\]\n]*\]|[^\]\n])+)\]\(slack:\/\/[^)]+\)/g, "$1")
+}
+
+export const SAME_LANGUAGE_SENTINEL = "__SLKT_SAME_LANG__"
+
 const BATCH_SYSTEM_PROMPT = [
   "Translate each Slack message accurately into its requested target language.",
-  "Preserve the original vibe, intent, emotional tone, urgency, directness, and intensity exactly, along with names, URLs, code, formatting, and Slack mentions.",
+  "Preserve the original vibe, intent, emotional tone, urgency, directness, and intensity exactly.",
+  "Preserve formatting faithfully: Markdown syntax (*bold*, _italic_, ~strike~, `inline code`, ```code blocks```, quotes (> for single quotes, >> for nested quotes), and lists with bullets or numbers) must be preserved exactly. Never flatten >> nested quotes into > single quotes or strip quote prefixes.",
+  "Strictly do not translate code inside ```code blocks``` or `inline code`, URLs, email addresses, @mentions (e.g. @username, @here, @channel, including parenthetical or bilingual display names like @Name (note)), #channels, or emoji codes (:emoji_name:).",
+  "Follow the target language's natural spacing conventions around emoji codes (:emoji_name:): when translating into languages that use spaces between words (such as English, Vietnamese, etc.), ensure words are separated from emoji codes with a space (e.g. 'text :emoji:' rather than 'text:emoji:'); when translating into scripts without inter-word spaces (such as Japanese or Chinese), preserve natural tight placement without inserting unnatural spaces.",
+  "Strictly preserve all placeholder tokens such as __SLKT_0__, __SLKT_1__, etc. exactly as written. Do not translate, change, reorder, or remove any placeholder token.",
+  "Strictly preserve forwarded headers starting with ↳ (such as ↳ Name:) exactly as written. Do not translate the name or alter the ↳ symbol.",
+  "Strictly do not include '(edited)' or edited timestamp labels in the translation.",
   "Never soften, sanitize, de-escalate, add politeness, or make an angry, tense, blunt, critical, or confrontational message sound friendlier than the source.",
-  "If currentMessage is already written in the requested target language, return an empty string for that item's translation. Do not translate, paraphrase, or repeat it.",
-  "Each [[SLACKTOR_LINE_BREAK]] token in currentMessage represents an exact line break. Preserve every token unchanged and in the same position in the translation.",
+  `If currentMessage is already written in the requested target language, immediately return the exact string "${SAME_LANGUAGE_SENTINEL}" as the translation for that item — do not translate, paraphrase, or repeat the message. Perform this check first, before any translation work.`,
+  "Preserve the exact line breaks, list indentation, and nested list hierarchy (e.g. '  - subitem' with leading spaces) faithfully. For multi-level or nested lists, you MUST preserve the exact leading space indentation and hierarchical nesting. Never flatten nested sub-items into top-level items, and do not insert empty lines between list items.",
   "For threadGroups, use sharedContext only to resolve meaning for every item in that group. Translate only each item's currentMessage.",
   "For standaloneItems, use previousMessages only to resolve meaning. Translate only currentMessage.",
   "Return only valid JSON with a translations array. Each entry must contain the unchanged id and its translation. Escape quotation marks and control characters inside every JSON string. Do not add markdown or commentary.",
@@ -286,36 +332,52 @@ function buildBatchSystemPrompt(customPrompt: string): string {
     : BATCH_SYSTEM_PROMPT
 }
 
-const LINE_BREAK_MARKER = "[[SLACKTOR_LINE_BREAK]]"
-
-function encodeLineBreaks(text: string): string {
-  return text.replace(/\r\n?|\n/g, LINE_BREAK_MARKER)
-}
-
 function decodeLineBreaks(text: string): string {
-  return text.replace(/\s*\[\[SLACKTOR_LINE_BREAK\]\]\s*/g, "\n").trim()
+  let normalized = text
+    .replace(/\\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/(?:^|\s*)\((?:edited|đã chỉnh sửa|編集済み)\)\s*$/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+
+  let prev = ""
+  while (prev !== normalized) {
+    prev = normalized
+    normalized = normalized.replace(
+      /((?:^|\r?\n)[ \t]*(?:[-*+•]|\d+[.)])[^\r\n]*)\r?\n\r?\n+(?=[ \t]*(?:[-*+•]|\d+[.)])[ \t]+)/g,
+      "$1\n",
+    )
+  }
+  return normalized
 }
 
 async function requestTranslationBatch(items: TranslationBatchItem[]): Promise<void> {
   const liveItems = items.filter((item) => !item.signal?.aborted)
   for (const item of items) {
-    if (!liveItems.includes(item)) item.reject(item.signal?.reason ?? new DOMException("Translation terminated.", "AbortError"))
+    if (!liveItems.includes(item))
+      item.reject(item.signal?.reason ?? new DOMException("Translation terminated.", "AbortError"))
   }
   const [first] = liveItems
   if (!first) return
   const controller = new AbortController()
   const abortIfEmpty = () => {
-    if (liveItems.every((item) => item.signal?.aborted)) controller.abort(new DOMException("Translation terminated.", "AbortError"))
+    if (liveItems.every((item) => item.signal?.aborted))
+      controller.abort(new DOMException("Translation terminated.", "AbortError"))
   }
   for (const item of liveItems) item.signal?.addEventListener("abort", abortIfEmpty, { once: true })
   try {
     const translations = await performTranslationRequest(liveItems, controller.signal)
-    const completed = await Promise.all(liveItems.filter((item) => !item.signal?.aborted).map(async (item) => {
-      const translation = translations.get(item.id)
-      if (translation === undefined) throw new Error("AI provider omitted a translation from the batch response.")
-      await cacheTranslation(item.message, item.settings, translation, item.context)
-      return { item, translation }
-    }))
+    const completed = await Promise.all(
+      liveItems
+        .filter((item) => !item.signal?.aborted)
+        .map(async (item) => {
+          const translation = translations.get(item.id)
+          if (translation === undefined)
+            throw new Error("AI provider omitted a translation from the batch response.")
+          await cacheTranslation(item.message, item.settings, translation, item.context)
+          return { item, translation }
+        }),
+    )
     await countTranslatedMessages(completed.filter((result) => result.translation).length)
     for (const result of completed) result.item.resolve(result.translation)
   } catch (error) {
@@ -333,9 +395,11 @@ async function performTranslationRequest(
   if (!first) return new Map()
   const settings = first.settings
   const baseUrl = settings.baseUrl.replace(/\/+$/, "")
-  const endpoint = baseUrl.endsWith("/chat/completions")
-    ? baseUrl
-    : `${baseUrl}/chat/completions`
+  const endpoint = baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl}/chat/completions`
+  const itemMasks = new Map<string, Map<string, string>>()
+  for (const item of items) {
+    itemMasks.set(item.id, new Map<string, string>())
+  }
   const payload = {
     model: settings.model,
     messages: [
@@ -345,7 +409,7 @@ async function performTranslationRequest(
       },
       {
         role: "user",
-        content: buildBatchPrompt(items),
+        content: buildBatchPrompt(items, itemMasks),
       },
     ],
     temperature: 0.2,
@@ -354,11 +418,23 @@ async function performTranslationRequest(
     level: "info",
     scope: "translation",
     message: "Translation request started",
-    details: { endpoint: safeEndpoint(endpoint), model: settings.model, batchSize: items.length, urgent: bypassRateLimit },
+    details: {
+      endpoint: safeEndpoint(endpoint),
+      model: settings.model,
+      batchSize: items.length,
+      urgent: bypassRateLimit,
+    },
   })
   let response: Response
   try {
-    response = await requestWithRetry(endpoint, settings.apiKey, payload, signal, onRetryStateChange, bypassRateLimit)
+    response = await requestWithRetry(
+      endpoint,
+      settings.apiKey,
+      payload,
+      signal,
+      onRetryStateChange,
+      bypassRateLimit,
+    )
   } catch (error) {
     await writeLog({
       level: "error",
@@ -373,14 +449,36 @@ async function performTranslationRequest(
     const body = (await response.text()).replace(/\s+/g, " ").trim()
     const detail = body ? `: ${body.slice(0, 240)}` : ""
     const error = `AI request failed (${response.status})${detail}`
-    await writeLog({ level: "error", scope: "translation", message: error, details: { endpoint: safeEndpoint(endpoint), model: settings.model, status: response.status } })
+    await writeLog({
+      level: "error",
+      scope: "translation",
+      message: error,
+      details: { endpoint: safeEndpoint(endpoint), model: settings.model, status: response.status },
+    })
     throw new Error(error)
   }
 
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> }
   const content = data.choices?.[0]?.message?.content?.trim()
-  const translations = parseBatchTranslations(content)
-  await writeLog({ level: "info", scope: "translation", message: "Translation request completed", details: { endpoint: safeEndpoint(endpoint), model: settings.model, status: response.status, batchSize: items.length, urgent: bypassRateLimit } })
+  const rawTranslations = parseBatchTranslations(content)
+  const translations = new Map<string, string>()
+  for (const [id, translation] of rawTranslations) {
+    const maskMap = itemMasks.get(id)
+    const unmasked = maskMap ? unmaskClickableElements(translation, maskMap) : translation
+    translations.set(id, unmasked)
+  }
+  await writeLog({
+    level: "info",
+    scope: "translation",
+    message: "Translation request completed",
+    details: {
+      endpoint: safeEndpoint(endpoint),
+      model: settings.model,
+      status: response.status,
+      batchSize: items.length,
+      urgent: bypassRateLimit,
+    },
+  })
   return translations
 }
 
@@ -445,14 +543,21 @@ function retryDelayMs(attempt: number): number {
 function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(resolve, milliseconds)
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timeout)
-      reject(new DOMException("Translation terminated.", "AbortError"))
-    }, { once: true })
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout)
+        reject(new DOMException("Translation terminated.", "AbortError"))
+      },
+      { once: true },
+    )
   })
 }
 
-function buildBatchPrompt(items: TranslationRequestItem[]): string {
+function buildBatchPrompt(
+  items: TranslationRequestItem[],
+  itemMasks?: Map<string, Map<string, string>>,
+): string {
   const threadGroups = new Map<string, TranslationRequestItem[]>()
   const standaloneItems: TranslationRequestItem[] = []
   for (const item of items) {
@@ -466,6 +571,15 @@ function buildBatchPrompt(items: TranslationRequestItem[]): string {
     threadGroups.set(threadKey, group)
   }
 
+  const getMaskedMessage = (item: TranslationRequestItem): string => {
+    let maskMap = itemMasks?.get(item.id)
+    if (!maskMap) {
+      maskMap = new Map<string, string>()
+      itemMasks?.set(item.id, maskMap)
+    }
+    return maskClickableElements(item.message.sourceText, maskMap)
+  }
+
   return JSON.stringify({
     threadGroups: [...threadGroups.entries()].map(([threadKey, group]) => ({
       threadKey,
@@ -474,14 +588,14 @@ function buildBatchPrompt(items: TranslationRequestItem[]): string {
       items: group.map((item) => ({
         id: item.id,
         targetLanguage: item.settings.targetLanguage,
-        currentMessage: encodeLineBreaks(item.message.sourceText),
+        currentMessage: getMaskedMessage(item),
       })),
     })),
     standaloneItems: standaloneItems.map((item) => ({
       id: item.id,
       targetLanguage: item.settings.targetLanguage,
       previousMessages: getPreviousStandaloneMessages(item, standaloneItems),
-      currentMessage: encodeLineBreaks(item.message.sourceText),
+      currentMessage: getMaskedMessage(item),
     })),
   })
 }
@@ -491,7 +605,9 @@ function getBatchThreadKey(message: RawSlackMessage): string | undefined {
   return [message.workspaceId ?? "", message.conversationId, message.threadRootTs].join(":")
 }
 
-function buildSharedThreadContext(group: TranslationRequestItem[]): Array<{ author: string; text: string }> {
+function buildSharedThreadContext(
+  group: TranslationRequestItem[],
+): Array<{ author: string; text: string }> {
   const translatedMessageIds = new Set(group.map((item) => item.message.messageId))
   const contextById = new Map<string, { timestamp: string; author: string; text: string }>()
   for (const item of group) {
@@ -500,13 +616,14 @@ function buildSharedThreadContext(group: TranslationRequestItem[]): Array<{ auth
       contextById.set(message.messageId, {
         timestamp: message.timestamp,
         author: message.authorName ?? "Slack member",
-        text: message.sourceText,
+        text: sanitizeContextText(message.sourceText),
       })
     }
   }
 
-  const context = [...contextById.values()]
-    .sort((left, right) => Number.parseFloat(left.timestamp) - Number.parseFloat(right.timestamp))
+  const context = [...contextById.values()].sort(
+    (left, right) => Number.parseFloat(left.timestamp) - Number.parseFloat(right.timestamp),
+  )
   const selected: Array<{ author: string; text: string }> = []
   let characters = 0
   for (const message of context.slice(-MAX_SHARED_THREAD_CONTEXT_MESSAGES)) {
@@ -524,18 +641,26 @@ function getPreviousStandaloneMessages(
   const targetTimestamp = Number.parseFloat(target.message.timestamp ?? "")
   if (!Number.isFinite(targetTimestamp)) return []
   return standaloneItems
-    .filter((item) =>
-      item !== target &&
-      item.message.workspaceId === target.message.workspaceId &&
-      item.message.conversationId === target.message.conversationId &&
-      Number.parseFloat(item.message.timestamp ?? "") < targetTimestamp
+    .filter(
+      (item) =>
+        item !== target &&
+        item.message.workspaceId === target.message.workspaceId &&
+        item.message.conversationId === target.message.conversationId &&
+        Number.parseFloat(item.message.timestamp ?? "") < targetTimestamp,
     )
-    .sort((left, right) => Number.parseFloat(right.message.timestamp ?? "") - Number.parseFloat(left.message.timestamp ?? ""))
+    .sort(
+      (left, right) =>
+        Number.parseFloat(right.message.timestamp ?? "") -
+        Number.parseFloat(left.message.timestamp ?? ""),
+    )
     .slice(0, MAX_STANDALONE_CONTEXT_MESSAGES)
     .reverse()
     .map((item) => ({
-      author: item.message.author.status === "resolved" ? item.message.author.displayName ?? "Slack member" : "Slack member",
-      text: item.message.sourceText,
+      author:
+        item.message.author.status === "resolved"
+          ? (item.message.author.displayName ?? "Slack member")
+          : "Slack member",
+      text: sanitizeContextText(item.message.sourceText),
     }))
 }
 
@@ -549,12 +674,15 @@ function parseBatchTranslations(content: string | undefined): Map<string, string
     if (!(error instanceof SyntaxError)) throw error
     data = JSON.parse(sanitizeJsonStrings(normalized)) as typeof data
   }
-  if (!Array.isArray(data.translations)) throw new Error("AI provider returned an invalid batch response.")
-  return new Map(data.translations.flatMap((item) => (
-    typeof item.id === "string" && typeof item.translation === "string"
-      ? [[item.id, decodeLineBreaks(item.translation)] as const]
-      : []
-  )))
+  if (!Array.isArray(data.translations))
+    throw new Error("AI provider returned an invalid batch response.")
+  return new Map(
+    data.translations.flatMap((item) =>
+      typeof item.id === "string" && typeof item.translation === "string"
+        ? [[item.id, decodeLineBreaks(item.translation)] as const]
+        : [],
+    ),
+  )
 }
 
 function sanitizeJsonStrings(json: string): string {
@@ -566,7 +694,7 @@ function sanitizeJsonStrings(json: string): string {
     const character = json[index]
     if (!inString) {
       result += character
-      if (character === "\"") inString = true
+      if (character === '"') inString = true
       continue
     }
 
@@ -580,7 +708,7 @@ function sanitizeJsonStrings(json: string): string {
       escaped = true
       continue
     }
-    if (character === "\"") {
+    if (character === '"') {
       const remainder = json.slice(index + 1)
       const nextToken = remainder.match(/\S/)?.[0]
       const commaEndsString = nextToken === "," && /^\s*,\s*(?:["{]|$)/.test(remainder)
@@ -588,15 +716,13 @@ function sanitizeJsonStrings(json: string): string {
         result += character
         inString = false
       } else {
-        result += "\\\""
+        result += '\\"'
       }
       continue
     }
 
     const codePoint = character.charCodeAt(0)
-    result += codePoint <= 0x1f
-      ? `\\u${codePoint.toString(16).padStart(4, "0")}`
-      : character
+    result += codePoint <= 0x1f ? `\\u${codePoint.toString(16).padStart(4, "0")}` : character
   }
   return result
 }

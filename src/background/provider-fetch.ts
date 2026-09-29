@@ -3,7 +3,10 @@ const MIN_REQUEST_INTERVAL_MS = 500
 let nextRequestAt = 0
 let scheduling = Promise.resolve()
 
-export async function providerFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export async function providerFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
   let release: (() => void) | undefined
   const previous = scheduling
   scheduling = new Promise<void>((resolve) => {
@@ -26,10 +29,14 @@ export async function providerFetch(input: RequestInfo | URL, init?: RequestInit
 function delay(milliseconds: number, signal?: AbortSignal | null): Promise<void> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(resolve, milliseconds)
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timeout)
-      reject(signal.reason ?? new DOMException("Request aborted.", "AbortError"))
-    }, { once: true })
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout)
+        reject(signal.reason ?? new DOMException("Request aborted.", "AbortError"))
+      },
+      { once: true },
+    )
   })
 }
 import { countLlmRequest } from "./usage-stats"

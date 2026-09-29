@@ -5,9 +5,7 @@ Open a Slack page, then open DevTools Console. Slacktor installs the read-only
 reply or its thread root:
 
 ```js
-await CheckContext(
-  "https://workspace.slack.com/archives/C01234567/p1785312156202579"
-)
+await CheckContext("https://workspace.slack.com/archives/C01234567/p1785312156202579")
 ```
 
 The result includes:

@@ -1,5 +1,5 @@
-import type { ThreadContextMessage } from "../shared/types"
 import { getProviderSettings } from "../shared/settings"
+import type { ThreadContextMessage } from "../shared/types"
 import { safeEndpoint, writeLog } from "./log-store"
 import { providerFetch } from "./provider-fetch"
 
@@ -25,7 +25,8 @@ export async function summarizeThread(messages: ThreadContextMessage[]): Promise
         messages: [
           {
             role: "system",
-            content: "Summarize this older Slack thread context concisely. Preserve decisions, unresolved questions, names, identifiers, and technical terms. Do not translate it and do not invent facts.",
+            content:
+              "Summarize this older Slack thread context concisely. Preserve decisions, unresolved questions, names, identifiers, and technical terms. Do not translate it and do not invent facts.",
           },
           { role: "user", content: transcript },
         ],
@@ -33,17 +34,32 @@ export async function summarizeThread(messages: ThreadContextMessage[]): Promise
       }),
     })
   } catch (error) {
-    await writeLog({ level: "error", scope: "summary", message: error instanceof Error ? error.message : "Thread summary network request failed", details: { endpoint: safeEndpoint(endpoint), model: settings.model } })
+    await writeLog({
+      level: "error",
+      scope: "summary",
+      message: error instanceof Error ? error.message : "Thread summary network request failed",
+      details: { endpoint: safeEndpoint(endpoint), model: settings.model },
+    })
     throw error
   }
   if (!response.ok) {
     const error = `Thread summary failed (${response.status}).`
-    await writeLog({ level: "error", scope: "summary", message: error, details: { endpoint: safeEndpoint(endpoint), model: settings.model, status: response.status } })
+    await writeLog({
+      level: "error",
+      scope: "summary",
+      message: error,
+      details: { endpoint: safeEndpoint(endpoint), model: settings.model, status: response.status },
+    })
     throw new Error(error)
   }
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> }
   const summary = data.choices?.[0]?.message?.content?.trim()
   if (!summary) throw new Error("AI provider returned no thread summary.")
-  await writeLog({ level: "info", scope: "summary", message: "Thread summary completed", details: { endpoint: safeEndpoint(endpoint), model: settings.model, status: response.status } })
+  await writeLog({
+    level: "info",
+    scope: "summary",
+    message: "Thread summary completed",
+    details: { endpoint: safeEndpoint(endpoint), model: settings.model, status: response.status },
+  })
   return summary
 }
